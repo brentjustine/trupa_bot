@@ -1,13 +1,12 @@
 torch==2.2.2+cpu
 -f https://download.pytorch.org/whl/torch_stable.html
-
 python-telegram-bot==13.15
 stable-baselines3==1.7.0
-gymnasium
-ta
-yfinance
-pandas
-numpy
-requests
-gdown
-schedule
+gymnasium==0.29.1
+ta==0.11.0
+yfinance==0.2.31
+pandas==2.2.2
+numpy==1.26.4
+requests==2.31.0
+gdown==5.1.0
+schedule==1.2.1

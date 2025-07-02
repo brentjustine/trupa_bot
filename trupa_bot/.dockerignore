@@ -1,0 +1,8 @@
+# Prevent large files from entering the Docker build
+*.zip
+*.pkl
+*.pt
+*.csv
+signal_log.csv
+__pycache__/
+.env

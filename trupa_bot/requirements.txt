@@ -9,3 +9,4 @@ requests
 shimmy>=2.0
 schedule
 shimmy>=2.0
+flask==2.3.3

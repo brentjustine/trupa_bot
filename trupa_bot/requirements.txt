@@ -8,5 +8,6 @@ pandas
 numpy
 requests
 schedule
+gdown
 flask==2.3.3
 shimmy>=2.0

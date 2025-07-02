@@ -13,9 +13,13 @@ __pycache__/
 .idea/
 .vscode/
 .env
+.env.*
 *.db
 *.ipynb
 .git/
+.gitattributes
+.gitignore
+.DS_Store
 *.jpg
 *.jpeg
 *.png

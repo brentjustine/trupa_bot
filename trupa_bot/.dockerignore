@@ -1,8 +1,12 @@
-# Prevent large files from entering the Docker build
+__pycache__/
 *.zip
 *.pkl
-*.pt
+*.log
 *.csv
-signal_log.csv
-__pycache__/
 .env
+.gdown*
+.ipynb_checkpoints/
+signal_log.csv
+trade_signals.log
+gold_ppo_model_retrained*
+vec_normalize.pkl

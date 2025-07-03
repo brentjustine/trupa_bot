@@ -4,7 +4,6 @@ import threading
 import datetime
 import schedule
 import gdown
-import logging
 import pandas as pd
 from zipfile import ZipFile
 from flask import Flask
@@ -17,7 +16,6 @@ from trading_env import GoldTradingEnv, add_indicators, fetch_data_twelvedata
 
 # === Flask Ping Server ===
 app = Flask(__name__)
-
 @app.route("/")
 def home():
     return "✅ Gold Trading Bot is alive!", 200
@@ -43,7 +41,6 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual")
 
 # === Load Data & Create Env ===
 df = add_indicators(fetch_data_twelvedata())
-
 def make_env():
     return GoldTradingEnv(df)
 
@@ -97,7 +94,6 @@ def export_log(update: Update, context: CallbackContext):
 
 # === Scheduler Job ===
 last_signal = {"timestamp": None}
-
 def check_market_and_send_signal():
     global last_signal
     try:
@@ -141,7 +137,7 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(10)
 
-# === Main Bot Webhook + Scheduler ===
+# === Main Bot Polling + Ping Server ===
 def main():
     updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -150,24 +146,13 @@ def main():
     dp.add_handler(CommandHandler("export", export_log))
 
     threading.Thread(target=run_scheduler, daemon=True).start()
-
-    PORT = int(os.environ.get("PORT", 8443))
-    WEBHOOK_URL = f"https://trupa-bot.onrender.com/{TELEGRAM_TOKEN}"
-
-    bot.delete_webhook()
-    updater.start_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=WEBHOOK_URL
-    )
+    updater.start_polling()
     updater.idle()
 
 # === Entry Point ===
 if __name__ == "__main__":
     threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8443))),
+        target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))),
         daemon=True
     ).start()
-
     main()

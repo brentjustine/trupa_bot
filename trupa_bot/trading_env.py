@@ -1,4 +1,3 @@
-%%writefile trading_env.py
 import os
 import gym
 import numpy as np

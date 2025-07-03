@@ -171,5 +171,3 @@ if __name__ == "__main__":
     ).start()
 
     main()
-
-I should paste this on github and commit then redeploy and everything will work now flawlessly?

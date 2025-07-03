@@ -1,3 +1,4 @@
+%%writefile trading_env.py
 import os
 import gym
 import numpy as np
@@ -52,17 +53,15 @@ class GoldTradingEnv(gym.Env):
         super(GoldTradingEnv, self).__init__()
         self.df = df.reset_index(drop=True)
 
-        # Core Parameters
+        # ⚙️ Core Settings
         self.initial_balance = 20.0
         self.window_size = 1
         self.max_trade_duration = 50
         self.leverage = 10
-        self.tp_threshold = 0.005
-        self.sl_threshold = 0.0025
         self.trade_cost = 0.02
         self.max_drawdown = 0.5
 
-        # Spaces
+        # 🎮 Action & Observation Space
         self.action_space = spaces.Discrete(3)  # Hold, Buy, Sell
         self.feature_size = df.shape[1] - 1  # Exclude datetime
         self.observation_space = spaces.Box(
@@ -86,6 +85,7 @@ class GoldTradingEnv(gym.Env):
         state = self.df.iloc[self.current_step].drop(['datetime']).values.astype(np.float32)
         position = np.array([self.position], dtype=np.float32)
         norm_balance = np.array([self.balance / self.initial_balance], dtype=np.float32)
+
         unrealized = 0.0
         if self.position != 0:
             current_price = self.df.iloc[self.current_step]['close']
@@ -102,23 +102,22 @@ class GoldTradingEnv(gym.Env):
 
         price = self.df.iloc[self.current_step]['close']
 
-        # Open new position
+        # 🚀 Open Position
         if action in [1, 2] and self.position == 0:
             self.position = 1 if action == 1 else -1
             self.entry_price = price
             self.position_duration = 0
-            reward -= self.trade_cost
+            reward -= self.trade_cost  # Entry cost
 
-        # Manual close
+        # 💣 Manual Close
         elif action == 0 and self.position != 0:
-            pnl = (price - self.entry_price) / self.entry_price * self.position
-            step_reward = pnl * 100 * self.leverage
+            pnl = (price - self.entry_price) * self.position
+            step_reward = pnl * self.leverage
             reward += step_reward
             self.balance += step_reward
             self.balance = np.round(self.balance, 4)
 
-            # Quick profit/loss modifier
-            if pnl > 0.002 and self.position_duration <= 5:
+            if pnl > 0 and self.position_duration <= 5:
                 reward += 0.2
             elif self.position_duration <= 5:
                 reward -= 0.05
@@ -128,19 +127,21 @@ class GoldTradingEnv(gym.Env):
             self.entry_price = 0
             self.position_duration = 0
 
-        # Auto close: TP/SL/MaxDuration
+        # 🔁 Auto Close via $4 TP / $3 SL or max duration
         if self.position != 0:
-            pnl = (price - self.entry_price) / self.entry_price * self.position
+            price_move = (price - self.entry_price) * self.position
             self.position_duration += 1
 
-            reward += pnl * (10 if pnl > 0 else 5)
+            if price_move > 0:
+                reward += price_move * 2
+            else:
+                reward += price_move
 
-            if (
-                pnl >= self.tp_threshold or
-                pnl <= -self.sl_threshold or
-                self.position_duration >= self.max_trade_duration
-            ):
-                step_reward = pnl * 100 * self.leverage
+            tp_hit = price >= self.entry_price + 4 if self.position == 1 else price <= self.entry_price - 4
+            sl_hit = price <= self.entry_price - 3 if self.position == 1 else price >= self.entry_price + 3
+
+            if tp_hit or sl_hit or self.position_duration >= self.max_trade_duration:
+                step_reward = price_move * self.leverage
                 reward += step_reward
                 self.balance += step_reward
                 self.balance = np.round(self.balance, 4)
@@ -148,19 +149,19 @@ class GoldTradingEnv(gym.Env):
                 self.entry_price = 0
                 self.position_duration = 0
             else:
-                reward -= 0.02  # holding penalty
+                reward -= 0.02
 
-        # Drawdown stop
+        # 🛑 Drawdown-Based Termination
         if self.balance < self.initial_balance * (1 - self.max_drawdown):
             reward -= (self.initial_balance - self.balance) / self.initial_balance * 5
             terminated = True
 
-        # End of data
+        # 📉 End of data
         self.current_step += 1
         if self.current_step >= len(self.df) - 1 or self.balance <= 0:
             if self.position != 0:
-                pnl = (price - self.entry_price) / self.entry_price * self.position
-                step_reward = pnl * 100 * self.leverage
+                pnl = (price - self.entry_price) * self.position
+                step_reward = pnl * self.leverage
                 reward += step_reward
                 self.balance += step_reward
                 self.position = 0
@@ -172,11 +173,10 @@ class GoldTradingEnv(gym.Env):
                 reward -= drawdown * 5
 
         if reward > 0.5:
-            reward += 0.2  # bonus for large profit
+            reward += 0.2
 
         reward = np.round(reward, 4)
         info["action_mask"] = [int(self.position == 0)] * 3
-
         return self._get_obs(), reward, terminated, truncated, info
 
     def render(self):

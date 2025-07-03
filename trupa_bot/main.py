@@ -15,13 +15,13 @@ import gdown
 
 # === Download model files from Google Drive if not present ===
 if not os.path.exists("gold_ppo_model_retrained.zip"):
-    gdown.download(id="1haAZqRiJjMOLF7ghB_6F-3B2MfW0_iLI", output="gold_ppo_model_retrained.zip", quiet=False)
+    gdown.download(id="13BWWyOspY0yZW0yNrdFqbA6QEnMn1Mfh", output="gold_ppo_model_retrained.zip", quiet=False)
     from zipfile import ZipFile
     with ZipFile("gold_ppo_model_retrained.zip", 'r') as zip_ref:
         zip_ref.extractall(".")
 
 if not os.path.exists("vec_normalize.pkl"):
-    gdown.download(id="1moPJVJIiIBM4VbS4lbKC3LOT3m09oYRt", output="vec_normalize.pkl", quiet=False)
+    gdown.download(id="1Q-wl0aqr4QAv6xDiQr1DX8T9cdVAQrZ1", output="vec_normalize.pkl", quiet=False)
 
 # === Logging Setup ===
 logging.basicConfig(filename='trade_signals.log', level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -82,25 +82,23 @@ def predict(update: Update, context: CallbackContext):
     macd = latest['macd']
     ema = latest['ema_20']
 
-    if not is_good_trade(latest, action[0]):
-        action_name = "Hold (Filtered)"
-        update.message.reply_text("🛑 Weak signal. Holding position.")
-        log_signal("⚠️ Signal filtered due to weak setup.")
+    if action_name in ["Buy", "Sell"]:
+        tp = close_price + 4 if action_name == "Buy" else close_price - 4
+        sl = close_price - 3 if action_name == "Buy" else close_price + 3
+        tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
     else:
-        pip = 0.01
-        sl_pips = 30 * pip
-        tp_pips = 40 * pip
-        tp = close_price + tp_pips if action[0] == 1 else close_price - tp_pips
-        sl = close_price - sl_pips if action[0] == 1 else close_price + sl_pips
+        tp_sl_line = "📌 No TP/SL — holding"
 
-        msg = (
-            f"📊 Signal: {action_name}\n"
-            f"💰 Price: {close_price:.2f}\n"
-            f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA20: {ema:.2f}\n"
-            f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-        )
-        update.message.reply_text(msg)
-        log_signal(msg)
+    msg = (
+        f"📊 Signal: {action_name}\n"
+        f"💰 Price: {close_price:.2f}\n"
+        f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA20: {ema:.2f}\n"
+        f"{tp_sl_line}"
+    )
+
+    update.message.reply_text(msg)
+    log_signal(msg)
+
 
 # === Scheduled Monitoring Job ===
 last_signal = {"timestamp": None, "action": None}
@@ -110,38 +108,43 @@ def check_market_and_send_signal():
     try:
         df_live = add_indicators(fetch_data_twelvedata())
         latest = df_live.iloc[-1]
+        current_time = latest['datetime']
+
+        # Avoid duplicate signals per candle
+        if last_signal["timestamp"] == current_time:
+            return
+
         obs = vec_env.reset()
         action, _ = model.predict(obs)
         action = action[0]
         action_name = ["Hold", "Buy", "Sell"][action]
 
-        if not is_good_trade(latest, action):
-            return
-
-        # Avoid duplicates
-        if last_signal["timestamp"] == latest['datetime'] and last_signal["action"] == action_name:
+        if action_name == "Hold":
             return
 
         close_price = latest['close']
-        pip = 0.01
-        sl_pips = 30 * pip
-        tp_pips = 40 * pip
-        tp = close_price + tp_pips if action == 1 else close_price - tp_pips
-        sl = close_price - sl_pips if action == 1 else close_price + sl_pips
+        rsi = latest['rsi']
+        macd = latest['macd']
+        ema = latest['ema_20']
+
+        tp = close_price + 4 if action_name == "Buy" else close_price - 4
+        sl = close_price - 3 if action_name == "Buy" else close_price + 3
 
         msg = (
             f"📊 Auto Signal: {action_name}\n"
-            f"💰 Price: {close_price:.2f}\n"
-            f"📈 RSI: {latest['rsi']:.2f} | MACD: {latest['macd']:.4f} | EMA20: {latest['ema_20']:.2f}\n"
+            f"💰 Entry Price: {close_price:.2f}\n"
+            f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA20: {ema:.2f}\n"
             f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
         )
 
         bot.send_message(chat_id=CHAT_ID, text=msg)
         log_signal(msg)
-        last_signal = {"timestamp": latest['datetime'], "action": action_name}
+
+        last_signal = {"timestamp": current_time, "action": action_name}
 
     except Exception as e:
         print(f"[Monitor Error] {e}")
+
 
 # === Background Scheduler Thread ===
 def run_scheduler():

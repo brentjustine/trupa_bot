@@ -176,5 +176,3 @@ if __name__ == "__main__":
         daemon=True
     ).start()
     main()
-
-are you sure no changes have been made in the function you onky add polling?

@@ -85,6 +85,8 @@ def calculate_tp_sl(action_name, price):
         tp = sl = None
     return tp, sl
 
+spread_tolerance = 0.3
+
 # === Telegram Bot Commands ===
 def start(update: Update, context: CallbackContext):
     msg = (
@@ -106,10 +108,17 @@ def predict(update: Update, context: CallbackContext):
 
     if trade_state["open_position"]:
         pos = trade_state["open_position"]
-        if (pos == "Buy" and (high >= trade_state["tp"] or low <= trade_state["sl"])) or \
-           (pos == "Sell" and (low <= trade_state["tp"] or high >= trade_state["sl"])):
-            result = "✅ TP hit" if (pos == "Buy" and high >= trade_state["tp"]) or \
-                                     (pos == "Sell" and low <= trade_state["tp"]) else "🛑 SL hit"
+        tp_hit = sl_hit = False
+
+        if pos == "Buy":
+            tp_hit = high >= (trade_state["tp"] - spread_tolerance)
+            sl_hit = low <= (trade_state["sl"] + spread_tolerance)
+        elif pos == "Sell":
+            tp_hit = low <= (trade_state["tp"] + spread_tolerance)
+            sl_hit = high >= (trade_state["sl"] - spread_tolerance)
+
+        if tp_hit or sl_hit:
+            result = "✅ TP hit" if tp_hit else "🛑 SL hit"
             update.message.reply_text(f"📤 Trade closed: {result}")
             log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="manual", trade_status=result)
             trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
@@ -163,10 +172,17 @@ def check_market_and_send_signal():
 
     if trade_state["open_position"]:
         pos = trade_state["open_position"]
-        if (pos == "Buy" and (high >= trade_state["tp"] or low <= trade_state["sl"])) or \
-           (pos == "Sell" and (low <= trade_state["tp"] or high >= trade_state["sl"])):
-            result = "✅ TP hit" if (pos == "Buy" and high >= trade_state["tp"]) or \
-                                     (pos == "Sell" and low <= trade_state["tp"]) else "🛑 SL hit"
+        tp_hit = sl_hit = False
+
+        if pos == "Buy":
+            tp_hit = high >= (trade_state["tp"] - spread_tolerance)
+            sl_hit = low <= (trade_state["sl"] + spread_tolerance)
+        elif pos == "Sell":
+            tp_hit = low <= (trade_state["tp"] + spread_tolerance)
+            sl_hit = high >= (trade_state["sl"] - spread_tolerance)
+
+        if tp_hit or sl_hit:
+            result = "✅ TP hit" if tp_hit else "🛑 SL hit"
             bot.send_message(chat_id=CHAT_ID, text=f"📤 Trade closed: {result}")
             log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="auto", trade_status=result)
             trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}

@@ -42,7 +42,7 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual")
 
 # === Load Model and Environment ===
 download_model_files()
-df = add_indicators(fetch_data_twelvedata())
+df = add_indicators(fetch_data_twelvedata(interval="15min"))
 
 def make_env():
     return GoldTradingEnv(df)
@@ -58,6 +58,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 bot = Bot(token=TELEGRAM_TOKEN)
 
+# === Trade Memory State ===
+trade_state = {
+    "open_position": None,
+    "entry_price": None,
+    "tp": None,
+    "sl": None
+}
+
 # === Telegram Bot Commands ===
 def start(update: Update, context: CallbackContext):
     msg = (
@@ -68,12 +76,30 @@ def start(update: Update, context: CallbackContext):
     update.message.reply_text(msg, parse_mode="Markdown")
 
 def predict(update: Update, context: CallbackContext):
+    global trade_state
+    df_live = add_indicators(fetch_data_twelvedata(interval="15min"))
+    latest = df_live.iloc[-1]
+    high = latest["high"]
+    low = latest["low"]
+    close_price = latest["close"]
+
+    # If in a trade, check TP/SL
+    if trade_state["open_position"]:
+        pos = trade_state["open_position"]
+        if (pos == "Buy" and (high >= trade_state["tp"] or low <= trade_state["sl"])) or \
+           (pos == "Sell" and (low <= trade_state["tp"] or high >= trade_state["sl"])):
+            result = "✅ TP hit" if (pos == "Buy" and high >= trade_state["tp"]) or \
+                                     (pos == "Sell" and low <= trade_state["tp"]) else "🛑 SL hit"
+            trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
+            update.message.reply_text(f"📤 Trade closed: {result}")
+        else:
+            update.message.reply_text("⏳ Trade ongoing. Waiting for TP/SL.")
+            return
+
     obs = vec_env.reset()
     action, _ = model.predict(obs)
     action_name = ["Hold", "Buy", "Sell"][action[0]]
 
-    latest = df.iloc[-1]
-    close_price = latest["close"]
     rsi = latest["rsi"]
     macd = latest["macd"]
     ema = latest["ema_20"]
@@ -81,6 +107,12 @@ def predict(update: Update, context: CallbackContext):
     if action_name in ["Buy", "Sell"]:
         tp = close_price + 4 if action_name == "Buy" else close_price - 4
         sl = close_price - 3 if action_name == "Buy" else close_price + 3
+        trade_state = {
+            "open_position": action_name,
+            "entry_price": close_price,
+            "tp": tp,
+            "sl": sl
+        }
         tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
     else:
         tp = sl = None
@@ -107,20 +139,35 @@ def export_log(update: Update, context: CallbackContext):
 last_signal = {"timestamp": None}
 
 def check_market_and_send_signal():
-    global last_signal
+    global trade_state, last_signal
     try:
-        df_live = add_indicators(fetch_data_twelvedata())
+        df_live = add_indicators(fetch_data_twelvedata(interval="15min"))
         latest = df_live.iloc[-1]
+        high = latest["high"]
+        low = latest["low"]
+        close_price = latest["close"]
         current_time = latest["datetime"]
 
+        # Check for open trade TP/SL
+        if trade_state["open_position"]:
+            pos = trade_state["open_position"]
+            if (pos == "Buy" and (high >= trade_state["tp"] or low <= trade_state["sl"])) or \
+               (pos == "Sell" and (low <= trade_state["tp"] or high >= trade_state["sl"])):
+                result = "✅ TP hit" if (pos == "Buy" and high >= trade_state["tp"]) or \
+                                         (pos == "Sell" and low <= trade_state["tp"]) else "🛑 SL hit"
+                bot.send_message(chat_id=CHAT_ID, text=f"📤 Auto trade closed: {result}")
+                trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
+                return  # Wait for next entry opportunity
+            else:
+                return  # Trade is ongoing
+
         if last_signal["timestamp"] == current_time:
-            return  # already sent this hour
+            return  # already checked this interval
 
         obs = vec_env.reset()
         action, _ = model.predict(obs)
         action_name = ["Hold", "Buy", "Sell"][action[0]]
 
-        close_price = latest["close"]
         rsi = latest["rsi"]
         macd = latest["macd"]
         ema = latest["ema_20"]
@@ -128,6 +175,12 @@ def check_market_and_send_signal():
         if action_name in ["Buy", "Sell"]:
             tp = close_price + 4 if action_name == "Buy" else close_price - 4
             sl = close_price - 3 if action_name == "Buy" else close_price + 3
+            trade_state = {
+                "open_position": action_name,
+                "entry_price": close_price,
+                "tp": tp,
+                "sl": sl
+            }
             tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
         else:
             tp = sl = None
@@ -148,7 +201,7 @@ def check_market_and_send_signal():
         print(f"[Monitor Error] {e}")
 
 def run_scheduler():
-    schedule.every().hour.at(":00").do(check_market_and_send_signal)
+    schedule.every(15).minutes.do(check_market_and_send_signal)
     while True:
         schedule.run_pending()
         time.sleep(10)

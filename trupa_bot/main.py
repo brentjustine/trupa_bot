@@ -47,7 +47,7 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual",
 
 # === Load Model and Environment ===
 download_model_files()
-df = add_indicators(fetch_data_twelvedata(interval="1hr"))
+df = add_indicators(fetch_data_twelvedata(interval="1h"))
 
 def make_env():
     return GoldTradingEnv(df)
@@ -98,7 +98,7 @@ def start(update: Update, context: CallbackContext):
 
 def predict(update: Update, context: CallbackContext):
     global trade_state
-    df_live = add_indicators(fetch_data_twelvedata(interval="1hr"))
+    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
     latest = df_live.iloc[-1]
     high = latest["high"]
     low = latest["low"]
@@ -155,7 +155,7 @@ def export_log(update: Update, context: CallbackContext):
 
 def check_market_and_send_signal():
     global trade_state
-    df_live = add_indicators(fetch_data_twelvedata(interval="15min"))
+    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
     latest = df_live.iloc[-1]
     high = latest["high"]
     low = latest["low"]

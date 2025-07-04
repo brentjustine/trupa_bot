@@ -18,7 +18,7 @@ from trading_env import GoldTradingEnv, add_indicators, fetch_data_twelvedata
 app = Flask(__name__)
 @app.route("/")
 def home():
-    return "✅ Gold Trading Bot is alive!", 200
+    return "✅ Gold Trading Bot is alive!\nVisit: https://trupa-bot.onrender.com", 200
 
 @app.route(f"/{os.getenv('TELEGRAM_TOKEN')}", methods=["POST"])
 def webhook():
@@ -79,7 +79,8 @@ def start(update: Update, context: CallbackContext):
         "🤖 Welcome to the Gold Trading Bot!\n"
         "Available commands:\n"
         "/predict — Get the latest trading signal.\n"
-        "/export — Download the signal log as CSV."
+        "/export — Download the signal log as CSV.\n"
+        "🌐 Dashboard: https://trupa-bot.onrender.com"
     )
     update.message.reply_text(msg)
 

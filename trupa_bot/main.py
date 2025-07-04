@@ -36,12 +36,20 @@ def download_model_files():
         gdown.download(id="1Q-wl0aqr4QAv6xDiQr1DX8T9cdVAQrZ1", output="vec_normalize.pkl", quiet=False)
 
 # === Signal Logging ===
-def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual", trade_status="open"):
+def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual", trade_status="open", update_last=False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_path = "signal_log.csv"
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
             f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
+
+    if update_last:
+        df = pd.read_csv(file_path)
+        if len(df) > 0:
+            df.iloc[-1] = [timestamp, source, f"{price:.2f}", f"{rsi:.2f}", f"{macd:.4f}", f"{ema:.2f}", action, tp or '', sl or '', trade_status]
+            df.to_csv(file_path, index=False)
+            return
+
     with open(file_path, "a") as f:
         f.write(f"{timestamp},{source},{price:.2f},{rsi:.2f},{macd:.4f},{ema:.2f},{action},{tp or ''},{sl or ''},{trade_status}\n")
 
@@ -120,7 +128,7 @@ def predict(update: Update, context: CallbackContext):
         if tp_hit or sl_hit:
             result = "✅ TP hit" if tp_hit else "🛑 SL hit"
             update.message.reply_text(f"📤 Trade closed: {result}")
-            log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="manual", trade_status=result)
+            log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="manual", trade_status=result, update_last=True)
             trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
             return
         else:
@@ -184,7 +192,7 @@ def check_market_and_send_signal():
         if tp_hit or sl_hit:
             result = "✅ TP hit" if tp_hit else "🛑 SL hit"
             bot.send_message(chat_id=CHAT_ID, text=f"📤 Trade closed: {result}")
-            log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="auto", trade_status=result)
+            log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="auto", trade_status=result, update_last=True)
             trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
             return
         else:

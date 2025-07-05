@@ -1,4 +1,3 @@
-
 import os
 import time
 import requests
@@ -95,9 +94,9 @@ class GoldTradingEnv(gym.Env):
         self.tp_price_move = 4.0
         self.sl_price_move = 3.0
 
-        # Observation space updated to (11,) to match the shape of the observation
+        # Observation space updated to (12,) to match the shape of the observation
         self.action_space = spaces.Discrete(2)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32)
 
         self.current_step = 0
         self.position = None
@@ -109,7 +108,7 @@ class GoldTradingEnv(gym.Env):
         obs = np.array([
             row['open'], row['high'], row['low'], row['close'], row['ema_50'],
             row['rsi'], row['obv'], row['bb_width'], row['vwap'],
-            row['fib_0'], row['fib_618']  # Only 11 features now
+            row['fib_0'], row['fib_618']  # 12 features now
         ], dtype=np.float32)
         return obs
 

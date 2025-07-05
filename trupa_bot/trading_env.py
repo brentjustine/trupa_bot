@@ -1,4 +1,4 @@
-%%writefile trading_env.py
+
 import os
 import time
 import requests

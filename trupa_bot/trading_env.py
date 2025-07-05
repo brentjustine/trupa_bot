@@ -77,13 +77,11 @@ def add_indicators(df):
 class GoldTradingEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
-
     def __init__(self, df, phase=5):
         super().__init__()
         print("✅ Using GoldTradingEnv with phase =", phase)
         self.df = df.reset_index(drop=True)
         self.phase = phase
-
 
         self.phase_params = {
             1: (1.0, -1.0, float('inf'), 0.0),
@@ -94,30 +92,26 @@ class GoldTradingEnv(gym.Env):
         }
         self.tp_reward, self.sl_penalty, self.entry_threshold, self.entry_penalty = self.phase_params[self.phase]
 
-
         self.tp_price_move = 4.0
         self.sl_price_move = 3.0
 
-
+        # Observation space updated to (11,) to match the shape of the observation
         self.action_space = spaces.Discrete(2)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32)
-
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32)
 
         self.current_step = 0
         self.position = None
         self.entry_waiting_steps = 0
         self.done = False
 
-
     def _get_observation(self):
         row = self.df.iloc[self.current_step]
         obs = np.array([
             row['open'], row['high'], row['low'], row['close'], row['ema_50'],
             row['rsi'], row['obv'], row['bb_width'], row['vwap'],
-            row['fib_0'], row['fib_618'], row['fib_100']
+            row['fib_0'], row['fib_618']  # Only 11 features now
         ], dtype=np.float32)
         return obs
-
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -128,25 +122,21 @@ class GoldTradingEnv(gym.Env):
         obs = self._get_observation()
         return obs, {}
 
-
     def step(self, action):
         assert self.action_space.contains(action), "Invalid action"
         reward = 0.0
         info = {}
-
 
         row = self.df.iloc[self.current_step]
         high = row['high']
         low = row['low']
         close = row['close']
 
-
         # === No position yet — handle entry ===
         if self.position is None:
             self.entry_waiting_steps += 1
             if self.entry_waiting_steps > self.entry_threshold:
                 reward += self.entry_penalty
-
 
             if action in [0, 1]:
                 self.position = {
@@ -156,17 +146,14 @@ class GoldTradingEnv(gym.Env):
                 }
                 self.entry_waiting_steps = 0
 
-
         # === Position is open — start checking from Candle N+1 ===
         else:
             self.position['steps_open'] += 1
             entry_price = self.position['entry_price']
 
-
             if self.position['type'] == 'buy':
                 tp_price = entry_price + self.tp_price_move
                 sl_price = entry_price - self.sl_price_move
-
 
                 if low <= sl_price:
                     reward = self.sl_penalty
@@ -175,11 +162,9 @@ class GoldTradingEnv(gym.Env):
                     reward = self.tp_reward
                     self.position = None
 
-
             elif self.position['type'] == 'sell':
                 tp_price = entry_price - self.tp_price_move
                 sl_price = entry_price + self.sl_price_move
-
 
                 if high >= sl_price:
                     reward = self.sl_penalty
@@ -187,7 +172,6 @@ class GoldTradingEnv(gym.Env):
                 elif low <= tp_price:
                     reward = self.tp_reward
                     self.position = None
-
 
         self.current_step += 1
         self.done = self.current_step >= len(self.df) - 1

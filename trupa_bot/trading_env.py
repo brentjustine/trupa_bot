@@ -108,7 +108,7 @@ class GoldTradingEnv(gym.Env):
         obs = np.array([
             row['open'], row['high'], row['low'], row['close'], row['ema_50'],
             row['rsi'], row['obv'], row['bb_width'], row['vwap'],
-            row['fib_0'], row['fib_618']  # 12 features now
+            row['fib_0']  # Removed fib_618 to match 11 features
         ], dtype=np.float32)
         return obs
 

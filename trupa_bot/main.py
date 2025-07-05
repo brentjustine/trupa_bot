@@ -13,6 +13,7 @@ from telegram.ext import Dispatcher, CommandHandler, CallbackContext
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from trading_env import GoldTradingEnv, add_indicators, fetch_data_twelvedata
+import numpy as np
 
 # === Flask Ping Server ===
 app = Flask(__name__)
@@ -39,19 +40,29 @@ def download_model_files():
 def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual", trade_status="open", update_last=False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_path = "signal_log.csv"
+    header = "datetime,source,price,rsi,macd,ema,obv,bb_width,vwap,fib_0,fib_618,fib_100,action,tp,sl,status\n"
+
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
-            f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
+            f.write(header)
+
+    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
+    latest = df_live.iloc[-1]
 
     if update_last:
         df = pd.read_csv(file_path)
         if len(df) > 0:
-            df.iloc[-1] = [timestamp, source, f"{price:.2f}", f"{rsi:.2f}", f"{macd:.4f}", f"{ema:.2f}", action, tp or '', sl or '', trade_status]
+            df.iloc[-1] = [
+                timestamp, source, f"{price:.2f}", f"{rsi:.2f}", f"{macd:.4f}", f"{ema:.2f}",
+                latest["obv"], latest["bb_width"], latest["vwap"],
+                latest["fib_0"], latest["fib_618"], latest["fib_100"],
+                action, tp or '', sl or '', trade_status
+            ]
             df.to_csv(file_path, index=False)
             return
 
     with open(file_path, "a") as f:
-        f.write(f"{timestamp},{source},{price:.2f},{rsi:.2f},{macd:.4f},{ema:.2f},{action},{tp or ''},{sl or ''},{trade_status}\n")
+        f.write(f"{timestamp},{source},{price:.2f},{rsi:.2f},{macd:.4f},{ema:.2f},{latest['obv']},{latest['bb_width']},{latest['vwap']},{latest['fib_0']},{latest['fib_618']},{latest['fib_100']},{action},{tp or ''},{sl or ''},{trade_status}\n")
 
 # === Load Model and Environment ===
 download_model_files()
@@ -74,6 +85,9 @@ dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
 
 # === Trade Memory State ===
 trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
+waiting_steps = 0
+WAITING_THRESHOLD = 4
+spread_tolerance = 0.3
 
 # === TP/SL Calculation ===
 def calculate_tp_sl(action_name, price):
@@ -82,18 +96,69 @@ def calculate_tp_sl(action_name, price):
     if action_name == "Buy":
         tp = round(price + tp_buffer, 2)
         sl = round(price - sl_buffer, 2)
-        if tp == price: tp += 0.05
-        if sl == price: sl -= 0.05
     elif action_name == "Sell":
         tp = round(price - tp_buffer, 2)
         sl = round(price + sl_buffer, 2)
-        if tp == price: tp -= 0.05
-        if sl == price: sl += 0.05
     else:
         tp = sl = None
     return tp, sl
 
-spread_tolerance = 0.3
+# === Auto Trading Logic ===
+def check_market_and_send_signal():
+    global waiting_steps
+    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
+    latest = df_live.iloc[-1]
+
+    if trade_state["open_position"]:
+        high = latest["high"]
+        low = latest["low"]
+        current_price = latest["close"]
+        pos = trade_state["open_position"]
+
+        tp_hit = sl_hit = False
+        if pos == "Buy":
+            tp_hit = high >= (trade_state["tp"] - spread_tolerance)
+            sl_hit = low <= (trade_state["sl"] + spread_tolerance)
+        elif pos == "Sell":
+            tp_hit = low <= (trade_state["tp"] + spread_tolerance)
+            sl_hit = high >= (trade_state["sl"] - spread_tolerance)
+
+        if tp_hit or sl_hit:
+            result = "✅ TP hit" if tp_hit else "🛑 SL hit"
+            log_signal(pos, current_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="auto", trade_status=result, update_last=True)
+            bot.send_message(chat_id=CHAT_ID, text=f"📤 Trade closed: {result}")
+            trade_state.update({"open_position": None, "entry_price": None, "tp": None, "sl": None})
+            waiting_steps = 0
+        return
+
+    obs = latest[["open", "high", "low", "close", "ema_50", "rsi", "obv", "bb_width", "vwap", "fib_0", "fib_618", "fib_100"]].values.astype(np.float32)
+    obs = obs.reshape(1, -1)
+    obs = vec_env.normalize_obs(obs)
+    action, _ = model.predict(obs, deterministic=True)
+    action_name = "Buy" if action == 0 else "Sell"
+    tp, sl = calculate_tp_sl(action_name, latest["close"])
+
+    waiting_steps += 1
+    if waiting_steps >= WAITING_THRESHOLD:
+        bot.send_message(chat_id=CHAT_ID, text="⏳ Wait. No good entry.")
+        waiting_steps = 0
+        return
+
+    trade_state.update({
+        "open_position": action_name,
+        "entry_price": latest["close"],
+        "tp": tp,
+        "sl": sl
+    })
+
+    waiting_steps = 0
+    log_signal(action_name, latest["close"], latest["rsi"], latest["macd"], latest["ema_20"], tp, sl, source="auto")
+    msg = (
+        f"📈 Auto Signal: {action_name}\n"
+        f"💰 Price: {latest['close']:.2f}\n"
+        f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
+    )
+    bot.send_message(chat_id=CHAT_ID, text=msg)
 
 # === Telegram Bot Commands ===
 def start(update: Update, context: CallbackContext):
@@ -107,60 +172,35 @@ def start(update: Update, context: CallbackContext):
     update.message.reply_text(msg)
 
 def predict(update: Update, context: CallbackContext):
-    global trade_state
+    global waiting_steps
     df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
     latest = df_live.iloc[-1]
-    high = latest["high"]
-    low = latest["low"]
-    close_price = latest["close"]
 
-    if trade_state["open_position"]:
-        pos = trade_state["open_position"]
-        tp_hit = sl_hit = False
+    obs = latest[["open", "high", "low", "close", "ema_50", "rsi", "obv", "bb_width", "vwap", "fib_0", "fib_618", "fib_100"]].values.astype(np.float32)
+    obs = obs.reshape(1, -1)
+    obs = vec_env.normalize_obs(obs)
 
-        if pos == "Buy":
-            tp_hit = high >= (trade_state["tp"] - spread_tolerance)
-            sl_hit = low <= (trade_state["sl"] + spread_tolerance)
-        elif pos == "Sell":
-            tp_hit = low <= (trade_state["tp"] + spread_tolerance)
-            sl_hit = high >= (trade_state["sl"] - spread_tolerance)
+    action, _ = model.predict(obs, deterministic=True)
+    action_name = "Buy" if action == 0 else "Sell"
+    tp, sl = calculate_tp_sl(action_name, latest["close"])
 
-        if tp_hit or sl_hit:
-            result = "✅ TP hit" if tp_hit else "🛑 SL hit"
-            update.message.reply_text(f"📤 Trade closed: {result}")
-            log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="manual", trade_status=result, update_last=True)
-            trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
-            return
-        else:
-            update.message.reply_text("⏳ Trade ongoing. Waiting for TP/SL.")
-            return
+    trade_state.update({
+        "open_position": action_name,
+        "entry_price": latest["close"],
+        "tp": tp,
+        "sl": sl
+    })
 
-    obs = vec_env.reset()
-    action, _ = model.predict(obs)
-    action_name = ["Hold", "Buy", "Sell"][action[0]]
+    waiting_steps = 0
 
-    rsi, macd, ema = latest["rsi"], latest["macd"], latest["ema_20"]
-    tp, sl = calculate_tp_sl(action_name, close_price)
-
-    if action_name in ["Buy", "Sell"]:
-        trade_state = {
-            "open_position": action_name,
-            "entry_price": close_price,
-            "tp": tp,
-            "sl": sl
-        }
-        tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-    else:
-        tp_sl_line = "📌 No TP/SL — holding"
+    log_signal(action_name, latest["close"], latest["rsi"], latest["macd"], latest["ema_20"], tp, sl, source="manual")
 
     msg = (
-        f"📊 Signal: {action_name}\n"
-        f"💰 Price: {close_price:.2f}\n"
-        f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA20: {ema:.2f}\n"
-        f"{tp_sl_line}"
+        f"📈 Signal: {action_name}\n"
+        f"💰 Price: {latest['close']:.2f}\n"
+        f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
     )
     update.message.reply_text(msg)
-    log_signal(action_name, close_price, rsi, macd, ema, tp, sl, source="manual")
 
 def export_log(update: Update, context: CallbackContext):
     file_path = "signal_log.csv"
@@ -169,61 +209,6 @@ def export_log(update: Update, context: CallbackContext):
             update.message.reply_document(InputFile(f, filename="signal_log.csv"))
     else:
         update.message.reply_text("⚠️ No signal log available yet.")
-
-def check_market_and_send_signal():
-    global trade_state
-    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
-    latest = df_live.iloc[-1]
-    high = latest["high"]
-    low = latest["low"]
-    close_price = latest["close"]
-
-    if trade_state["open_position"]:
-        pos = trade_state["open_position"]
-        tp_hit = sl_hit = False
-
-        if pos == "Buy":
-            tp_hit = high >= (trade_state["tp"] - spread_tolerance)
-            sl_hit = low <= (trade_state["sl"] + spread_tolerance)
-        elif pos == "Sell":
-            tp_hit = low <= (trade_state["tp"] + spread_tolerance)
-            sl_hit = high >= (trade_state["sl"] - spread_tolerance)
-
-        if tp_hit or sl_hit:
-            result = "✅ TP hit" if tp_hit else "🛑 SL hit"
-            bot.send_message(chat_id=CHAT_ID, text=f"📤 Trade closed: {result}")
-            log_signal(pos, close_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="auto", trade_status=result, update_last=True)
-            trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
-            return
-        else:
-            return
-
-    obs = vec_env.reset()
-    action, _ = model.predict(obs)
-    action_name = ["Hold", "Buy", "Sell"][action[0]]
-
-    rsi, macd, ema = latest["rsi"], latest["macd"], latest["ema_20"]
-    tp, sl = calculate_tp_sl(action_name, close_price)
-
-    if action_name in ["Buy", "Sell"]:
-        trade_state = {
-            "open_position": action_name,
-            "entry_price": close_price,
-            "tp": tp,
-            "sl": sl
-        }
-        tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-    else:
-        tp_sl_line = "📌 No TP/SL — holding"
-
-    msg = (
-        f"📊 [Auto] Signal: {action_name}\n"
-        f"💰 Price: {close_price:.2f}\n"
-        f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA20: {ema:.2f}\n"
-        f"{tp_sl_line}"
-    )
-    bot.send_message(chat_id=CHAT_ID, text=msg)
-    log_signal(action_name, close_price, rsi, macd, ema, tp, sl, source="auto")
 
 # === Scheduler ===
 def run_scheduler():
@@ -243,3 +228,4 @@ if __name__ == "__main__":
     bot.set_webhook(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}")
     threading.Thread(target=run_scheduler, daemon=True).start()
     app.run(host="0.0.0.0", port=port)
+

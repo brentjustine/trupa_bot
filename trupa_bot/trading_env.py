@@ -1,23 +1,35 @@
+%%writefile trading_env.py
 import os
-import gym
+import time
+import requests
 import numpy as np
 import pandas as pd
+from datetime import datetime, timedelta
 import ta
-import requests
+import gym
 from gym import spaces
+from stable_baselines3.common.monitor import Monitor
 
-# === Fetch Data from Twelve Data ===
-def fetch_data_twelvedata(
-    symbol="XAU/USD",
-    interval="1h",
-    outputsize=500,
-    apikey=None
-):
-    apikey = apikey or os.getenv("TWELVE_DATA_API_KEY")
+# === ✅ Fetch Only Recent 200 Candles ===
+def fetch_data_twelvedata(symbol="XAU/USD", interval="1h", outputsize=200):
+    apikey = os.getenv("TWELVE_DATA_API_KEY")
+    if not apikey:
+        raise ValueError("TWELVE_DATA_API_KEY environment variable is not set.")
+
+    current_end = datetime.utcnow()
+    interval_hours = int(interval.replace("h", ""))
+    current_start = current_end - timedelta(hours=outputsize * interval_hours)
+
     url = (
         f"https://api.twelvedata.com/time_series"
-        f"?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={apikey}&format=JSON"
+        f"?symbol={symbol}"
+        f"&interval={interval}"
+        f"&start_date={current_start.strftime('%Y-%m-%d %H:%M:%S')}"
+        f"&end_date={current_end.strftime('%Y-%m-%d %H:%M:%S')}"
+        f"&apikey={apikey}&format=JSON"
     )
+
+    print(f"Fetching: {current_start} to {current_end}")
     response = requests.get(url)
     data = response.json()
 
@@ -28,155 +40,156 @@ def fetch_data_twelvedata(
     df['datetime'] = pd.to_datetime(df['datetime'])
     df = df.sort_values('datetime').reset_index(drop=True)
 
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        if col in df.columns:
-            df[col] = df[col].astype(float)
+    for col in ['open', 'high', 'low', 'close']:
+        df[col] = df[col].astype(float)
+
+    df['change'] = df['close'].pct_change().fillna(0)
 
     return df
 
-# === Add Technical Indicators ===
+# === ✅ Add Indicators ===
 def add_indicators(df):
-    df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
-    df['ema_20'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
-    df['macd'] = ta.trend.MACD(df['close']).macd()
-    df['bb_bbm'] = ta.volatility.BollingerBands(df['close']).bollinger_mavg()
+    df['ema_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
 
-    df = df.dropna().reset_index(drop=True)
-    return df
+    if 'volume' in df.columns and df['volume'].nunique() > 1:
+        df['obv'] = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume']).on_balance_volume()
+    else:
+        df['obv'] = 0
 
-# === Custom Gym Environment ===
+    bb = ta.volatility.BollingerBands(df['close'])
+    df['bb_width'] = bb.bollinger_hband() - bb.bollinger_lband()
+    df['vwap'] = df['close'].expanding().mean()
+
+    high = df['high'].max()
+    low = df['low'].min()
+    diff = high - low
+    df['fib_0'] = low
+    df['fib_236'] = high - 0.236 * diff
+    df['fib_382'] = high - 0.382 * diff
+    df['fib_500'] = high - 0.500 * diff
+    df['fib_618'] = high - 0.618 * diff
+    df['fib_100'] = high
+
+    return df.dropna().reset_index(drop=True)
+
+# === ✅ Trading Env (same as before) ===
 class GoldTradingEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, df):
-        super(GoldTradingEnv, self).__init__()
+
+    def __init__(self, df, phase=5):
+        super().__init__()
+        print("✅ Using GoldTradingEnv with phase =", phase)
         self.df = df.reset_index(drop=True)
+        self.phase = phase
 
-        # ⚙️ Core Settings
-        self.initial_balance = 20.0
-        self.window_size = 1
-        self.max_trade_duration = 50
-        self.leverage = 10
-        self.trade_cost = 0.02
-        self.max_drawdown = 0.5
 
-        # 🎮 Action & Observation Space
-        self.action_space = spaces.Discrete(3)  # Hold, Buy, Sell
-        self.feature_size = df.shape[1] - 1  # Exclude datetime
-        self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(self.feature_size + 3,),
-            dtype=np.float32
-        )
+        self.phase_params = {
+            1: (1.0, -1.0, float('inf'), 0.0),
+            2: (2.0, -1.0, 20, -0.05),
+            3: (1.0, -2.0, 10, -0.05),
+            4: (1.0, -3.0, 5, -0.2),
+            5: (1.0, -4.0, 0, -0.5),
+        }
+        self.tp_reward, self.sl_penalty, self.entry_threshold, self.entry_penalty = self.phase_params[self.phase]
 
-    def reset(self, seed=None, options=None):
-        self.np_random, seed = gym.utils.seeding.np_random(seed)
-        self.balance = self.initial_balance
-        self.position = 0
-        self.entry_price = 0
-        self.position_duration = 0
-        self.current_step = self.np_random.integers(0, len(self.df) - 100)
-        self.last_manual_close_step = -10
-        return self._get_obs(), {}
 
-    def _get_obs(self):
-        state = self.df.iloc[self.current_step].drop(['datetime']).values.astype(np.float32)
-        position = np.array([self.position], dtype=np.float32)
-        norm_balance = np.array([self.balance / self.initial_balance], dtype=np.float32)
+        self.tp_price_move = 4.0
+        self.sl_price_move = 3.0
 
-        unrealized = 0.0
-        if self.position != 0:
-            current_price = self.df.iloc[self.current_step]['close']
-            unrealized = (current_price - self.entry_price) / self.entry_price * self.position
-        unrealized = np.array([unrealized], dtype=np.float32)
 
-        return np.concatenate([state, position, norm_balance, unrealized])
+        self.action_space = spaces.Discrete(2)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32)
+
+
+        self.current_step = 0
+        self.position = None
+        self.entry_waiting_steps = 0
+        self.done = False
+
+
+    def _get_observation(self):
+        row = self.df.iloc[self.current_step]
+        obs = np.array([
+            row['open'], row['high'], row['low'], row['close'], row['ema_50'],
+            row['rsi'], row['obv'], row['bb_width'], row['vwap'],
+            row['fib_0'], row['fib_618'], row['fib_100']
+        ], dtype=np.float32)
+        return obs
+
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.current_step = 0
+        self.position = None
+        self.entry_waiting_steps = 0
+        self.done = False
+        obs = self._get_observation()
+        return obs, {}
+
 
     def step(self, action):
-        terminated = False
-        truncated = False
+        assert self.action_space.contains(action), "Invalid action"
         reward = 0.0
         info = {}
 
-        price = self.df.iloc[self.current_step]['close']
 
-        # 🚀 Open Position
-        if action in [1, 2] and self.position == 0:
-            self.position = 1 if action == 1 else -1
-            self.entry_price = price
-            self.position_duration = 0
-            reward -= self.trade_cost  # Entry cost
+        row = self.df.iloc[self.current_step]
+        high = row['high']
+        low = row['low']
+        close = row['close']
 
-        # 💣 Manual Close
-        elif action == 0 and self.position != 0:
-            pnl = (price - self.entry_price) * self.position
-            step_reward = pnl * self.leverage
-            reward += step_reward
-            self.balance += step_reward
-            self.balance = np.round(self.balance, 4)
 
-            if pnl > 0 and self.position_duration <= 5:
-                reward += 0.2
-            elif self.position_duration <= 5:
-                reward -= 0.05
+        # === No position yet — handle entry ===
+        if self.position is None:
+            self.entry_waiting_steps += 1
+            if self.entry_waiting_steps > self.entry_threshold:
+                reward += self.entry_penalty
 
-            self.last_manual_close_step = self.current_step
-            self.position = 0
-            self.entry_price = 0
-            self.position_duration = 0
 
-        # 🔁 Auto Close via $4 TP / $3 SL or max duration
-        if self.position != 0:
-            price_move = (price - self.entry_price) * self.position
-            self.position_duration += 1
+            if action in [0, 1]:
+                self.position = {
+                    'type': 'buy' if action == 0 else 'sell',
+                    'entry_price': close,  # Entry at Candle N close
+                    'steps_open': 0
+                }
+                self.entry_waiting_steps = 0
 
-            if price_move > 0:
-                reward += price_move * 2
-            else:
-                reward += price_move
 
-            tp_hit = price >= self.entry_price + 4 if self.position == 1 else price <= self.entry_price - 4
-            sl_hit = price <= self.entry_price - 3 if self.position == 1 else price >= self.entry_price + 3
+        # === Position is open — start checking from Candle N+1 ===
+        else:
+            self.position['steps_open'] += 1
+            entry_price = self.position['entry_price']
 
-            if tp_hit or sl_hit or self.position_duration >= self.max_trade_duration:
-                step_reward = price_move * self.leverage
-                reward += step_reward
-                self.balance += step_reward
-                self.balance = np.round(self.balance, 4)
-                self.position = 0
-                self.entry_price = 0
-                self.position_duration = 0
-            else:
-                reward -= 0.02
 
-        # 🛑 Drawdown-Based Termination
-        if self.balance < self.initial_balance * (1 - self.max_drawdown):
-            reward -= (self.initial_balance - self.balance) / self.initial_balance * 5
-            terminated = True
+            if self.position['type'] == 'buy':
+                tp_price = entry_price + self.tp_price_move
+                sl_price = entry_price - self.sl_price_move
 
-        # 📉 End of data
+
+                if low <= sl_price:
+                    reward = self.sl_penalty
+                    self.position = None
+                elif high >= tp_price:
+                    reward = self.tp_reward
+                    self.position = None
+
+
+            elif self.position['type'] == 'sell':
+                tp_price = entry_price - self.tp_price_move
+                sl_price = entry_price + self.sl_price_move
+
+
+                if high >= sl_price:
+                    reward = self.sl_penalty
+                    self.position = None
+                elif low <= tp_price:
+                    reward = self.tp_reward
+                    self.position = None
+
+
         self.current_step += 1
-        if self.current_step >= len(self.df) - 1 or self.balance <= 0:
-            if self.position != 0:
-                pnl = (price - self.entry_price) * self.position
-                step_reward = pnl * self.leverage
-                reward += step_reward
-                self.balance += step_reward
-                self.position = 0
-                self.entry_price = 0
-                self.position_duration = 0
-            terminated = True
-            if self.balance < self.initial_balance:
-                drawdown = (self.initial_balance - self.balance) / self.initial_balance
-                reward -= drawdown * 5
-
-        if reward > 0.5:
-            reward += 0.2
-
-        reward = np.round(reward, 4)
-        info["action_mask"] = [int(self.position == 0)] * 3
-        return self._get_obs(), reward, terminated, truncated, info
-
-    def render(self):
-        print(f"Step: {self.current_step} | Balance: {self.balance:.2f} | Position: {self.position} | Entry: {self.entry_price:.2f}")
+        self.done = self.current_step >= len(self.df) - 1
+        obs = self._get_observation()
+        return obs, reward, self.done, False, info

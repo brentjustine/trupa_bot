@@ -186,6 +186,19 @@ def predict(update: Update, context: CallbackContext):
 
     except Exception as e:
         update.message.reply_text(f"❌ Error during prediction: {e}")
+        
+# === /export ===
+def export_log(update: Update, context: CallbackContext):
+    try:
+        log_file_path = "signal_log.csv"
+        if os.path.exists(log_file_path):
+            with open(log_file_path, "rb") as f:
+                bot.send_document(chat_id=CHAT_ID, document=InputFile(f, filename="signal_log.csv"))
+            update.message.reply_text("✅ The signal log has been exported.")
+        else:
+            update.message.reply_text("❌ No signal log file found.")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error during log export: {e}")
 
 # === Auto Signal ===
 def check_market_and_send_signal():

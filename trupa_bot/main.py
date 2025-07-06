@@ -272,6 +272,15 @@ def clear_log_file():
             print(f"✅ Log file '{log_file_path}' cleared.")
         except Exception as e:
             print(f"❌ Error while clearing log file: {e}")
+            
+def run_scheduler():
+    # Set up the schedule for checking market and sending signals
+    schedule.every(15).minutes.do(check_market_and_send_signal)  # Run every 15 minutes
+    
+    # Run the scheduler in an infinite loop
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
 
 if __name__ == "__main__":
     # Clear the log file on each re-run

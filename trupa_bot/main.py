@@ -9,7 +9,7 @@ import gdown
 from zipfile import ZipFile
 from telegram import Bot, Update, InputFile
 from telegram.ext import Updater, CommandHandler, CallbackContext
-import flask import Flask, request
+from flask import Flask, request
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from trading_env import TPSSLTradingEnv, add_indicators, fetch_data_twelvedata

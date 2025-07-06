@@ -22,8 +22,9 @@ def home():
 @app.route(f"/{os.getenv('TELEGRAM_TOKEN')}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
+    dp.process_update(update)  # Use dp instead of dispatcher
     return "OK", 200
+
 # === Download model files if missing ===
 if not os.path.exists("gold_ppo_model_retrained.zip"):
     gdown.download(id="1t4wHEXStdKQX7mtDxAWE8eYtxSvkloXq", output="gold_ppo_model_retrained.zip", quiet=False)

@@ -1,178 +1,236 @@
 import os
-import time
-import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
 import ta
 import gym
-from gym import spaces
-from stable_baselines3.common.monitor import Monitor
+from gym import Env, spaces
+from gym.wrappers import RecordEpisodeStatistics
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.callbacks import BaseCallback
+import requests
+import datetime  # Ensure datetime is imported
+import os
+import requests
+import pandas as pd
 
-# === ✅ Fetch Only Recent 200 Candles ===
-def fetch_data_twelvedata(symbol="XAU/USD", interval="1h", outputsize=200):
-    apikey = os.getenv("TWELVE_DATA_API_KEY")
-    if not apikey:
-        raise ValueError("TWELVE_DATA_API_KEY environment variable is not set.")
-
-    current_end = datetime.utcnow()
-    interval_hours = int(interval.replace("h", ""))
-    current_start = current_end - timedelta(hours=outputsize * interval_hours)
-
+def fetch_data_twelvedata(
+    symbol="XAU/USD",
+    interval="1h",
+    outputsize=200,
+    apikey=None
+):
+    # Use the API key, either provided or from environment variable
+    apikey = apikey or os.getenv("TWELVE_DATA_API_KEY")
     url = (
         f"https://api.twelvedata.com/time_series"
-        f"?symbol={symbol}"
-        f"&interval={interval}"
-        f"&start_date={current_start.strftime('%Y-%m-%d %H:%M:%S')}"
-        f"&end_date={current_end.strftime('%Y-%m-%d %H:%M:%S')}"
-        f"&apikey={apikey}&format=JSON"
+        f"?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={apikey}&format=JSON"
     )
-
-    print(f"Fetching: {current_start} to {current_end}")
+    
+    # Fetch the data from the API
     response = requests.get(url)
     data = response.json()
 
+    # Check for 'values' in the response
     if 'values' not in data:
         raise Exception(f"API Error: {data}")
 
+    # Create the DataFrame
     df = pd.DataFrame(data['values'])
+
+    # Ensure 'datetime' column is parsed correctly
     df['datetime'] = pd.to_datetime(df['datetime'])
     df = df.sort_values('datetime').reset_index(drop=True)
 
-    for col in ['open', 'high', 'low', 'close']:
-        df[col] = df[col].astype(float)
+    # Convert 'close' to numeric, in case there are any unexpected string values
+    if 'close' in df.columns:
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')  # Convert 'close' to float
+    
+    # Ensure 'change' exists or calculate it
+    if 'change' not in df.columns:
+        print("Calculating 'change' column...")  # Debugging line
+        df['change'] = df['close'].pct_change() * 100  # Calculate percentage change
+        df['change'] = df['change'].fillna(0)  # Handle NaN values by filling with 0 or a suitable strategy
+    
+    # Ensure all relevant columns are numeric
+    for col in ['open', 'high', 'low', 'close', 'change']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')  # Ensure all columns are numeric
 
-    df['change'] = df['close'].pct_change().fillna(0)
+    # Final check for missing required columns
+    required_columns = ['open', 'high', 'low', 'close', 'change']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        print(f"❌ Missing columns: {missing_columns}")
+        raise ValueError(f"Missing required columns: {missing_columns}")
 
+    # Drop the 'datetime' column as requested
+    df = df.drop(columns=['datetime'], errors='ignore')
+
+    # Return the processed DataFrame
     return df
 
-# === ✅ Add Indicators ===
+# Other functions remain unchanged
 def add_indicators(df):
-    df['ema_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-
-    if 'volume' in df.columns and df['volume'].nunique() > 1:
-        df['obv'] = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume']).on_balance_volume()
-    else:
-        df['obv'] = 0
-
-    bb = ta.volatility.BollingerBands(df['close'])
+    df['ema_50'] = ta.trend.EMAIndicator(close=df['close'], window=50).ema_indicator()
+    df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
+    macd = ta.trend.MACD(close=df['close'])
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['macd_diff'] = macd.macd_diff()
+    bb = ta.volatility.BollingerBands(close=df['close'])
     df['bb_width'] = bb.bollinger_hband() - bb.bollinger_lband()
     df['vwap'] = df['close'].expanding().mean()
 
-    high = df['high'].max()
-    low = df['low'].min()
-    diff = high - low
-    df['fib_0'] = low
-    df['fib_236'] = high - 0.236 * diff
-    df['fib_382'] = high - 0.382 * diff
-    df['fib_500'] = high - 0.500 * diff
-    df['fib_618'] = high - 0.618 * diff
-    df['fib_100'] = high
+    # Fibonacci levels
+    window = 100
+    high_roll = df['high'].rolling(window).max()
+    low_roll = df['low'].rolling(window).min()
+    diff = high_roll - low_roll
+    df['fib_0'] = low_roll
+    df['fib_236'] = high_roll - 0.236 * diff
+    df['fib_382'] = high_roll - 0.382 * diff
+    df['fib_500'] = high_roll - 0.500 * diff
+    df['fib_618'] = high_roll - 0.618 * diff
+    df['fib_100'] = high_roll
 
     return df.dropna().reset_index(drop=True)
 
-# === ✅ Trading Env (same as before) ===
-class GoldTradingEnv(gym.Env):
-    metadata = {"render_modes": ["human"]}
 
-    def __init__(self, df, phase=5):
+class TPSSLTradingEnv(Env):
+    def __init__(self, df: pd.DataFrame, max_episode_steps: int = 500, delay_threshold: int = 50):
         super().__init__()
-        print("✅ Using GoldTradingEnv with phase =", phase)
         self.df = df.reset_index(drop=True)
-        self.phase = phase
+        self.numeric_df = self.df.select_dtypes(include=[np.number])
+        self.max_episode_steps = max_episode_steps
+        self.delay_threshold = delay_threshold  # Delay threshold for penalty
 
-        self.phase_params = {
-            1: (1.0, -1.0, float('inf'), 0.0),
-            2: (2.0, -1.0, 20, -0.05),
-            3: (1.0, -2.0, 10, -0.05),
-            4: (1.0, -3.0, 5, -0.2),
-            5: (1.0, -4.0, 0, -0.5),
-        }
-        self.tp_reward, self.sl_penalty, self.entry_threshold, self.entry_penalty = self.phase_params[self.phase]
+        self.action_space = spaces.Discrete(3)  # 0=Buy, 1=Sell, 2=Wait
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(self.numeric_df.shape[1],), dtype=np.float32
+        )
 
-        self.tp_price_move = 4.0
-        self.sl_price_move = 3.0
+        self.tp_value = 4.0  # Take Profit value
+        self.sl_value = 3.0  # Stop Loss value
 
-        # Observation space updated to (12,) to match the shape of the observation
-        self.action_space = spaces.Discrete(2)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32)
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.episode_winrates = []
 
+        self._validate_indicators()
+        self._reset_env()
+
+    def _validate_indicators(self):
+        required = ['rsi', 'macd', 'macd_signal', 'ema_50', 'close', 'high', 'low']
+        missing = [col for col in required if col not in self.df.columns]
+        if missing:
+            raise ValueError(f"Missing required indicators: {missing}")
+
+    def _reset_env(self):
         self.current_step = 0
+        self.steps_in_episode = 0
+        self.current_reward_total = 0
         self.position = None
-        self.entry_waiting_steps = 0
-        self.done = False
+        self.entry_price = 0.0
+        self.position_hold_steps = 0
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.wait_steps = 0  # Track how long the agent has been waiting
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self._reset_env()
+        return self._get_observation(), {}
 
     def _get_observation(self):
-        row = self.df.iloc[self.current_step]
-        obs = np.array([
-            row['open'], row['high'], row['low'], row['close'], row['ema_50'],
-            row['rsi'], row['obv'], row['bb_width'], row['vwap'],
-            row['fib_0']  # Removed fib_618 to match 11 features
-        ], dtype=np.float32)
-        return obs
+        return self.numeric_df.iloc[self.current_step].values.astype(np.float32)
 
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        self.current_step = 0
-        self.position = None
-        self.entry_waiting_steps = 0
-        self.done = False
-        obs = self._get_observation()
-        return obs, {}
-
-    def step(self, action):
-        assert self.action_space.contains(action), "Invalid action"
+    def step(self, action: int):
+        self.steps_in_episode += 1
         reward = 0.0
-        info = {}
+        terminated = truncated = False
 
-        row = self.df.iloc[self.current_step]
-        high = row['high']
-        low = row['low']
-        close = row['close']
+        price = self.df.loc[self.current_step, 'close']
+        next_row = self.df.iloc[self.current_step + 1]
+        next_high, next_low = next_row['high'], next_row['low']
+        rsi, macd, macd_signal, ema_50 = self.df.loc[self.current_step, ['rsi', 'macd', 'macd_signal', 'ema_50']]
 
-        # === No position yet — handle entry ===
+        def indicator_alignment(direction: str):
+            score = 0.0
+            if direction == "long":
+                if rsi < 30: score += 0.25
+                if macd > macd_signal: score += 0.25
+                if price > ema_50: score += 0.25
+            elif direction == "short":
+                if rsi > 70: score += 0.25
+                if macd < macd_signal: score += 0.25
+                if price < ema_50: score += 0.25
+            return score
+
         if self.position is None:
-            self.entry_waiting_steps += 1
-            if self.entry_waiting_steps > self.entry_threshold:
-                reward += self.entry_penalty
-
-            if action in [0, 1]:
-                self.position = {
-                    'type': 'buy' if action == 0 else 'sell',
-                    'entry_price': close,  # Entry at Candle N close
-                    'steps_open': 0
-                }
-                self.entry_waiting_steps = 0
-
-        # === Position is open — start checking from Candle N+1 ===
+            if action == 0:  # Buy
+                self.position = "long"
+                self.entry_price = price
+                reward += indicator_alignment("long")
+            elif action == 1:  # Sell
+                self.position = "short"
+                self.entry_price = price
+                reward += indicator_alignment("short")
+            elif action == 2:  # Wait
+                self.wait_steps += 1
+                if self.wait_steps > self.delay_threshold:
+                    reward -= 0.1  # Penalty for waiting too long
         else:
-            self.position['steps_open'] += 1
-            entry_price = self.position['entry_price']
+            self.position_hold_steps += 1
+            if self.position == "long":
+                if next_low <= self.entry_price - self.sl_value:
+                    reward = -1  # Stop loss hit
+                    self._end_trade()
+                elif next_high >= self.entry_price + self.tp_value:
+                    reward = 1 + indicator_alignment("long")  # Take profit hit
+                    self._end_trade(win=True)
+                else:
+                    reward -= 0.01 * self.position_hold_steps  # Penalty for holding too long
+            elif self.position == "short":
+                if next_high >= self.entry_price + self.sl_value:
+                    reward = -1  # Stop loss hit
+                    self._end_trade()
+                elif next_low <= self.entry_price - self.tp_value:
+                    reward = 1 + indicator_alignment("short")  # Take profit hit
+                    self._end_trade(win=True)
+                else:
+                    reward -= 0.01 * self.position_hold_steps  # Penalty for holding too long
 
-            if self.position['type'] == 'buy':
-                tp_price = entry_price + self.tp_price_move
-                sl_price = entry_price - self.sl_price_move
-
-                if low <= sl_price:
-                    reward = self.sl_penalty
-                    self.position = None
-                elif high >= tp_price:
-                    reward = self.tp_reward
-                    self.position = None
-
-            elif self.position['type'] == 'sell':
-                tp_price = entry_price - self.tp_price_move
-                sl_price = entry_price + self.sl_price_move
-
-                if high >= sl_price:
-                    reward = self.sl_penalty
-                    self.position = None
-                elif low <= tp_price:
-                    reward = self.tp_reward
-                    self.position = None
-
+        reward = float(np.clip(reward, -1.0, 1.0))
+        self.current_reward_total += reward
         self.current_step += 1
-        self.done = self.current_step >= len(self.df) - 1
-        obs = self._get_observation()
-        return obs, reward, self.done, False, info
+
+        if self.current_step >= len(self.df) - 2:
+            terminated = True
+        if self.steps_in_episode >= self.max_episode_steps:
+            truncated = True
+        if terminated or truncated:
+            self._finalize_episode()
+
+        return self._get_observation(), reward, terminated, truncated, {}
+
+    def _end_trade(self, win=False):
+        self.position = None
+        self.total_trades += 1
+        if win:
+            self.winning_trades += 1
+
+    def _finalize_episode(self):
+        self.episode_rewards.append(self.current_reward_total)
+        self.episode_lengths.append(self.steps_in_episode)
+        winrate = (self.winning_trades / self.total_trades) if self.total_trades else 0.0
+        self.episode_winrates.append(winrate * 100.0)
+
+    def render(self):
+        print(f"Step: {self.current_step} | Position: {self.position} | Entry: {self.entry_price:.2f}")
+
+    def close(self):
+        pass
+
+    def get_winrate_history(self):
+        return self.episode_winrates.copy()

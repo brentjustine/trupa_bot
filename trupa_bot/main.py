@@ -260,15 +260,22 @@ def clear_log_file():
         except Exception as e:
             print(f"❌ Error while clearing log file: {e}")
 
-clear_log_file()  # Clear the log file on each restart
-dp = updater.dispatcher
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(CommandHandler("predict", predict))
-dp.add_handler(CommandHandler("export", export_log))
-
-# === Entry Point ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    # Clear the log file on each re-run
+    clear_log_file()  # This will delete the log file every time the script starts
+
+    # Initialize the updater and dispatcher for Telegram bot commands
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("predict", predict))
+    dp.add_handler(CommandHandler("export", export_log))
+
+    # Set webhook for Telegram bot
     bot.set_webhook(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}")
+
+    # Start the scheduler in a separate thread
     threading.Thread(target=run_scheduler, daemon=True).start()
-    app.run(host="0.0.0.0", port=port)
+
+    # Start Flask app
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

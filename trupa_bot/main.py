@@ -1,21 +1,19 @@
+import logging
+import pandas as pd
+import datetime
 import os
 import time
 import threading
-import datetime
 import schedule
 import gdown
-import pandas as pd
 from zipfile import ZipFile
-from flask import Flask, request
 from telegram import Bot, Update, InputFile
-from telegram.ext import Dispatcher, CommandHandler, CallbackContext
-
+from telegram.ext import Updater, CommandHandler, CallbackContext
+import flask import Flask, request
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from trading_env import GoldTradingEnv, add_indicators, fetch_data_twelvedata
-import numpy as np
+from trading_env import TPSSLTradingEnv, add_indicators, fetch_data_twelvedata
 
-# === Flask Ping Server ===
 app = Flask(__name__)
 @app.route("/")
 def home():
@@ -26,52 +24,36 @@ def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
     return "OK", 200
+# === Download model files if missing ===
+if not os.path.exists("gold_ppo_model_retrained.zip"):
+    gdown.download(id="1t4wHEXStdKQX7mtDxAWE8eYtxSvkloXq", output="gold_ppo_model_retrained.zip", quiet=False)
+    with ZipFile("gold_ppo_model_retrained.zip", 'r') as zip_ref:
+        zip_ref.extractall(".")
 
-# === Download model files from Google Drive if missing ===
-def download_model_files():
-    if not os.path.exists("gold_ppo_model_retrained.zip"):
-        gdown.download(id="13BWWyOspY0yZW0yNrdFqbA6QEnMn1Mfh", output="gold_ppo_model_retrained.zip", quiet=False)
-        with ZipFile("gold_ppo_model_retrained.zip", 'r') as zip_ref:
-            zip_ref.extractall(".")
-    if not os.path.exists("vec_normalize.pkl"):
-        gdown.download(id="1Q-wl0aqr4QAv6xDiQr1DX8T9cdVAQrZ1", output="vec_normalize.pkl", quiet=False)
+if not os.path.exists("vec_normalize.pkl"):
+    gdown.download(id="1p6LOB3pM5-YhgNrLgF68X9dFT_hjhSqR", output="vec_normalize.pkl", quiet=False)
 
-# === Signal Logging ===
+# === Logging ===
 def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual", trade_status="open", update_last=False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_path = "signal_log.csv"
-    header = "datetime,source,price,rsi,macd,ema,obv,bb_width,vwap,fib_0,fib_618,fib_100,action,tp,sl,status\n"
-
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
-            f.write(header)
-
-    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
-    latest = df_live.iloc[-1]
+            f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
 
     if update_last:
         df = pd.read_csv(file_path)
         if len(df) > 0:
-            df.iloc[-1] = [
-                timestamp, source, f"{price:.2f}", f"{rsi:.2f}", f"{macd:.4f}", f"{ema:.2f}",
-                latest["obv"], latest["bb_width"], latest["vwap"],
-                latest["fib_0"], latest["fib_618"], latest["fib_100"],
-                action, tp or '', sl or '', trade_status
-            ]
+            df.iloc[-1] = [timestamp, source, f"{price:.2f}", f"{rsi:.2f}", f"{macd:.4f}", f"{ema:.2f}", action, tp or '', sl or '', trade_status]
             df.to_csv(file_path, index=False)
             return
 
     with open(file_path, "a") as f:
-        f.write(f"{timestamp},{source},{price:.2f},{rsi:.2f},{macd:.4f},{ema:.2f},{latest['obv']},{latest['bb_width']},{latest['vwap']},{latest['fib_0']},{latest['fib_618']},{latest['fib_100']},{action},{tp or ''},{sl or ''},{trade_status}\n")
+        f.write(f"{timestamp},{source},{price:.2f},{rsi:.2f},{macd:.4f},{ema:.2f},{action},{tp or ''},{sl or ''},{trade_status}\n")
 
-# === Load Model and Environment ===
-download_model_files()
-df = add_indicators(fetch_data_twelvedata(interval="1h"))
 
-def make_env():
-    return GoldTradingEnv(df)
-
-dummy_env = DummyVecEnv([make_env])
+# === Load initial model ===
+dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])  # Change here
 vec_env = VecNormalize.load("vec_normalize.pkl", dummy_env)
 vec_env.training = False
 vec_env.norm_reward = False
@@ -81,146 +63,208 @@ model = PPO.load("gold_ppo_model_retrained", env=vec_env)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 bot = Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
 
-# === Trade Memory State ===
-trade_state = {"open_position": None, "entry_price": None, "tp": None, "sl": None}
-waiting_steps = 0
-WAITING_THRESHOLD = 4
-spread_tolerance = 0.3
+# === Global Trade State with Lock ===
+trade_lock = threading.Lock()  # Threading lock to ensure thread-safety for global variables
+trade_open = False
+current_action = None
+current_tp = None
+current_sl = None
+trade_entry_price = None
+trade_timestamp = None
 
-# === TP/SL Calculation ===
-def calculate_tp_sl(action_name, price):
-    tp_buffer = 4.0
-    sl_buffer = 3.0
-    if action_name == "Buy":
-        tp = round(price + tp_buffer, 2)
-        sl = round(price - sl_buffer, 2)
-    elif action_name == "Sell":
-        tp = round(price - tp_buffer, 2)
-        sl = round(price + sl_buffer, 2)
-    else:
-        tp = sl = None
-    return tp, sl
-
-# === Auto Trading Logic ===
-def check_market_and_send_signal():
-    global waiting_steps
-    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
-    latest = df_live.iloc[-1]
-
-    if trade_state["open_position"]:
-        high = latest["high"]
-        low = latest["low"]
-        current_price = latest["close"]
-        pos = trade_state["open_position"]
-
-        tp_hit = sl_hit = False
-        if pos == "Buy":
-            tp_hit = high >= (trade_state["tp"] - spread_tolerance)
-            sl_hit = low <= (trade_state["sl"] + spread_tolerance)
-        elif pos == "Sell":
-            tp_hit = low <= (trade_state["tp"] + spread_tolerance)
-            sl_hit = high >= (trade_state["sl"] - spread_tolerance)
-
-        if tp_hit or sl_hit:
-            result = "✅ TP hit" if tp_hit else "🛑 SL hit"
-            log_signal(pos, current_price, latest["rsi"], latest["macd"], latest["ema_20"], trade_state["tp"], trade_state["sl"], source="auto", trade_status=result, update_last=True)
-            bot.send_message(chat_id=CHAT_ID, text=f"📤 Trade closed: {result}")
-            trade_state.update({"open_position": None, "entry_price": None, "tp": None, "sl": None})
-            waiting_steps = 0
-        return
-
-    obs = latest[["open", "high", "low", "close", "ema_50", "rsi", "obv", "bb_width", "vwap", "fib_0", "fib_618", "fib_100"]].values.astype(np.float32)
-    obs = obs.reshape(1, -1)
-    obs = vec_env.normalize_obs(obs)
-    action, _ = model.predict(obs, deterministic=True)
-    action_name = "Buy" if action == 0 else "Sell"
-    tp, sl = calculate_tp_sl(action_name, latest["close"])
-
-    waiting_steps += 1
-    if waiting_steps >= WAITING_THRESHOLD:
-        bot.send_message(chat_id=CHAT_ID, text="⏳ Wait. No good entry.")
-        waiting_steps = 0
-        return
-
-    trade_state.update({
-        "open_position": action_name,
-        "entry_price": latest["close"],
-        "tp": tp,
-        "sl": sl
-    })
-
-    waiting_steps = 0
-    log_signal(action_name, latest["close"], latest["rsi"], latest["macd"], latest["ema_20"], tp, sl, source="auto")
-    msg = (
-        f"📈 Auto Signal: {action_name}\n"
-        f"💰 Price: {latest['close']:.2f}\n"
-        f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-    )
-    bot.send_message(chat_id=CHAT_ID, text=msg)
-
-# === Telegram Bot Commands ===
+# === /start ===
 def start(update: Update, context: CallbackContext):
-    msg = (
-        "🤖 Welcome to the Gold Trading Bot!\n"
-        "Available commands:\n"
-        "/predict — Get the latest trading signal.\n"
-        "/export — Download the signal log as CSV.\n"
-        "🌐 Dashboard: https://trupa-bot.onrender.com"
+    welcome_msg = (
+        "🤖 *Welcome to the Gold Trading Bot!*\n\n"
+        "This bot uses a trained reinforcement learning AI to generate real-time trading signals for *XAU/USD*.\n\n"
+        "📌 *Available Commands:*\n"
+        "• /predict — Get the latest AI signal using live market data\n"
+        "• /export — Export the signal log as CSV\n"
+        "• /start — Show this help message\n\n"
+        "⏱️ Signals are also sent automatically every 15 minutes.\n"
+        "💡 Make sure notifications are enabled so you never miss a signal.\n\n"
+        f"🆔 *Your Chat ID:* `{update.message.chat_id}`"
     )
-    update.message.reply_text(msg)
+    update.message.reply_text(welcome_msg, parse_mode='Markdown')
 
+# === /predict ===
 def predict(update: Update, context: CallbackContext):
-    global waiting_steps
-    df_live = add_indicators(fetch_data_twelvedata(interval="1h"))
-    latest = df_live.iloc[-1]
+    global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp  # Declare globals at the top
+    try:
+        with trade_lock:  # Ensure that the global state is thread-safe
+            if trade_open:
+                # If a trade is open, check for TP or SL hit with a 0.3 spread
+                current_price = add_indicators(fetch_data_twelvedata()).iloc[-1]['close']
+                
+                # Check if TP or SL is hit
+                if (current_action == "Buy" and (current_price >= current_tp - 0.3 and current_price <= current_tp + 0.3)) or \
+                   (current_action == "Sell" and (current_price >= current_sl - 0.3 and current_price <= current_sl + 0.3)):
+                    # Notify that TP/SL is hit
+                    bot.send_message(chat_id=CHAT_ID, text=f"🔔 {current_action} TP/SL hit!")
+                    # Log trade exit status
+                    log_signal(current_action, current_price, None, None, None, current_tp, current_sl, trade_exit_status="TP/SL Hit")
+                    trade_open = False  # Reset trade state
+                    return
 
-    obs = latest[["open", "high", "low", "close", "ema_50", "rsi", "obv", "bb_width", "vwap", "fib_0", "fib_618", "fib_100"]].values.astype(np.float32)
-    obs = obs.reshape(1, -1)
-    obs = vec_env.normalize_obs(obs)
+                # Notify the current trade status if TP/SL hasn't been hit yet
+                msg = (
+                    f"📊 Trade Open: {current_action}\n"
+                    f"💰 Entry Price: {trade_entry_price:.2f}\n"
+                    f"🎯 TP: {current_tp:.2f} | 🛑 SL: {current_sl:.2f}\n"
+                    f"📉 Current Price: {current_price:.2f}\n"
+                )
+                update.message.reply_text(msg)
+                return
 
-    action, _ = model.predict(obs, deterministic=True)
-    action_name = "Buy" if action == 0 else "Sell"
-    tp, sl = calculate_tp_sl(action_name, latest["close"])
+            # Fetch live data and add indicators
+            df_live = add_indicators(fetch_data_twelvedata())
+            latest = df_live.iloc[-1]
+            close_price = latest['close']
+            rsi = latest['rsi']
+            macd = latest['macd']
+            ema_50 = latest['ema_50']
 
-    trade_state.update({
-        "open_position": action_name,
-        "entry_price": latest["close"],
-        "tp": tp,
-        "sl": sl
-    })
+            # Prepare data for model prediction
+            state = df_live.iloc[-1]  # Don't drop 'close', keep all features (18 features)
+            state = state.values.reshape(1, -1)  # Convert to 2D array for model input
 
-    waiting_steps = 0
+            # Normalize the state using the vec_env (VecNormalize)
+            state = vec_env.normalize_obs(state)  # Normalize the observation
 
-    log_signal(action_name, latest["close"], latest["rsi"], latest["macd"], latest["ema_20"], tp, sl, source="manual")
+            # Get model prediction (action)
+            action, _states = model.predict(state, deterministic=True)
+            action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
 
-    msg = (
-        f"📈 Signal: {action_name}\n"
-        f"💰 Price: {latest['close']:.2f}\n"
-        f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-    )
-    update.message.reply_text(msg)
+            # Set TP and SL based on action
+            if action_name == "Buy":
+                tp = close_price + 4.0  # Fixed TP of $4
+                sl = close_price - 3.0  # Fixed SL of $3
+            elif action_name == "Sell":
+                tp = close_price - 4.0  # Fixed TP of $4
+                sl = close_price + 3.0  # Fixed SL of $3
+            else:
+                tp = sl = None  # No TP/SL for holding
 
-def export_log(update: Update, context: CallbackContext):
-    file_path = "signal_log.csv"
-    if os.path.exists(file_path):
-        with open(file_path, "rb") as f:
-            update.message.reply_document(InputFile(f, filename="signal_log.csv"))
-    else:
-        update.message.reply_text("⚠️ No signal log available yet.")
+            # Save trade state only if the action is "Buy" or "Sell"
+            if action_name != "Hold":
+                trade_open = True
+                current_action = action_name
+                current_tp = tp
+                current_sl = sl
+                trade_entry_price = close_price
+                trade_timestamp = datetime.datetime.now()
 
-# === Scheduler ===
-def run_scheduler():
-    schedule.every(15).minutes.do(check_market_and_send_signal)
-    while True:
-        schedule.run_pending()
-        time.sleep(10)
+            # Prepare message to send to Telegram
+            if action_name in ["Buy", "Sell"]:
+                tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
+            else:
+                tp_sl_line = "📌 No TP/SL — holding"
 
-# === Attach Commands ===
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("predict", predict))
-dispatcher.add_handler(CommandHandler("export", export_log))
+            msg = (
+                f"📊 Live Signal: {action_name}\n"
+                f"💰 Price: {close_price:.2f}\n"
+                f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}\n"
+                f"{tp_sl_line}"
+            )
+
+            # Send message via Telegram
+            update.message.reply_text(msg)
+
+            # Log the signal only if it's not a "Hold"
+            if action_name != "Hold":
+                log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="manual-live")
+
+            # Check if TP or SL is hit right after prediction
+            if (action_name == "Buy" and (close_price >= tp - 0.3 and close_price <= tp + 0.3)) or \
+               (action_name == "Sell" and (close_price >= sl - 0.3 and close_price <= sl + 0.3)):
+                # Notify that TP/SL is hit immediately after prediction
+                bot.send_message(chat_id=CHAT_ID, text=f"🔔 {action_name} TP/SL hit!")
+                # Log trade exit status
+                log_signal(action_name, close_price, None, None, None, tp, sl, trade_exit_status="TP/SL Hit")
+                trade_open = False  # Reset trade state
+
+    except Exception as e:
+        update.message.reply_text(f"❌ Error during prediction: {e}")
+
+# === Auto Signal ===
+def check_market_and_send_signal():
+    global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp  # Declare globals at the top
+    try:
+        with trade_lock:  # Ensure that the global state is thread-safe
+            # If a trade is already open, check for TP or SL hit with a 0.3 spread
+            if trade_open:
+                current_price = add_indicators(fetch_data_twelvedata()).iloc[-1]['close']
+                
+                # Check if the price is within 0.3 of TP or SL
+                if (current_action == "Buy" and (current_price >= current_tp - 0.3 and current_price <= current_tp + 0.3)) or \
+                   (current_action == "Sell" and (current_price >= current_sl - 0.3 and current_price <= current_sl + 0.3)):
+                    # Notify that TP/SL is hit
+                    bot.send_message(chat_id=CHAT_ID, text=f"🔔 {current_action} TP/SL hit!")
+                    # Log trade exit status
+                    log_signal(current_action, current_price, None, None, None, current_tp, current_sl, trade_exit_status="TP/SL Hit")
+                    trade_open = False  # Reset trade state
+                    return
+
+            # Fetch live data and add indicators
+            df_live = add_indicators(fetch_data_twelvedata())
+            latest = df_live.iloc[-1]
+            close_price = latest['close']
+            rsi = latest['rsi']
+            macd = latest['macd']
+            ema_50 = latest['ema_50']
+
+            # Prepare data for model prediction
+            state = df_live.iloc[-1]  # Don't drop 'close', keep all features
+            state = state.values.reshape(1, -1)  # Convert to 2D array for model input
+            state = vec_env.normalize_obs(state)  # Normalize the observation
+
+            # Get model prediction (action)
+            action, _states = model.predict(state, deterministic=True)
+            action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
+
+            # Set TP and SL based on action
+            if action_name == "Buy":
+                tp = close_price + 4.0  # Fixed TP of $4
+                sl = close_price - 3.0  # Fixed SL of $3
+            elif action_name == "Sell":
+                tp = close_price - 4.0  # Fixed TP of $4
+                sl = close_price + 3.0  # Fixed SL of $3
+            else:
+                tp = sl = None
+
+            # If new trade action and not "Hold", log it and send signal
+            if action_name != "Hold" and not trade_open:
+                trade_open = True
+                current_action = action_name
+                current_tp = tp
+                current_sl = sl
+                trade_entry_price = close_price
+                trade_timestamp = datetime.datetime.now()
+
+                # Send message and log the signal
+                msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
+                bot.send_message(chat_id=CHAT_ID, text=msg)
+                log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")
+
+    except Exception as e:
+        bot.send_message(chat_id=CHAT_ID, text=f"❌ Error during auto signal: {e}")
+
+# === Clear Log File ===
+def clear_log_file():
+    log_file_path = "signal_log.csv"
+    if os.path.exists(log_file_path):
+        try:
+            os.remove(log_file_path)
+            print(f"✅ Log file '{log_file_path}' cleared.")
+        except Exception as e:
+            print(f"❌ Error while clearing log file: {e}")
+
+clear_log_file()  # Clear the log file on each restart
+dp = updater.dispatcher
+dp.add_handler(CommandHandler("start", start))
+dp.add_handler(CommandHandler("predict", predict))
+dp.add_handler(CommandHandler("export", export_log))
 
 # === Entry Point ===
 if __name__ == "__main__":
@@ -228,4 +272,3 @@ if __name__ == "__main__":
     bot.set_webhook(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}")
     threading.Thread(target=run_scheduler, daemon=True).start()
     app.run(host="0.0.0.0", port=port)
-

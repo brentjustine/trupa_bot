@@ -44,25 +44,33 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual",
         with open(file_path, "w") as f:
             f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
 
-    def safe_str(val, fmt):
-        return fmt.format(val) if val is not None else ""
-
-    price_str = safe_str(price, "{:.2f}")
-    rsi_str = safe_str(rsi, "{:.2f}")
-    macd_str = safe_str(macd, "{:.4f}")
-    ema_str = safe_str(ema, "{:.2f}")
-    tp_str = safe_str(tp, "{:.2f}")
-    sl_str = safe_str(sl, "{:.2f}")
+    def safe_float(val):
+        return round(float(val), 6) if val is not None else ""
 
     if update_last:
         df = pd.read_csv(file_path)
         if len(df) > 0:
-            df.iloc[-1] = [timestamp, source, price_str, rsi_str, macd_str, ema_str, action, tp_str, sl_str, trade_status]
+            df.iloc[-1] = [
+                timestamp,
+                source,
+                safe_float(price),
+                safe_float(rsi),
+                safe_float(macd),
+                safe_float(ema),
+                action,
+                safe_float(tp),
+                safe_float(sl),
+                trade_status
+            ]
             df.to_csv(file_path, index=False)
             return
 
+    # For appending, keep using strings
+    def safe_str(val, fmt):
+        return fmt.format(val) if val is not None else ""
+
     with open(file_path, "a") as f:
-        f.write(f"{timestamp},{source},{price_str},{rsi_str},{macd_str},{ema_str},{action},{tp_str},{sl_str},{trade_status}\n")
+        f.write(f"{timestamp},{source},{safe_str(price, '{:.2f}')},{safe_str(rsi, '{:.2f}')},{safe_str(macd, '{:.4f}')},{safe_str(ema, '{:.2f}')},{action},{safe_str(tp, '{:.2f}')},{safe_str(sl, '{:.2f}')},{trade_status}\n")
 
 # === Load initial model ===
 dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])

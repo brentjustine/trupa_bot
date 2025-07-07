@@ -38,19 +38,30 @@ if not os.path.exists("vec_normalize.pkl"):
 def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual", trade_status="open", update_last=False):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_path = "signal_log.csv"
+
+    # Create header if the file doesn't exist
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
             f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
 
+    # Format safely even if values are None
+    price_str = f"{price:.2f}" if price is not None else ""
+    rsi_str = f"{rsi:.2f}" if rsi is not None else ""
+    macd_str = f"{macd:.4f}" if macd is not None else ""
+    ema_str = f"{ema:.2f}" if ema is not None else ""
+    tp_str = f"{tp:.2f}" if tp is not None else ""
+    sl_str = f"{sl:.2f}" if sl is not None else ""
+
     if update_last:
         df = pd.read_csv(file_path)
         if len(df) > 0:
-            df.iloc[-1] = [timestamp, source, f"{price:.2f}", f"{rsi:.2f}", f"{macd:.4f}", f"{ema:.2f}", action, tp or '', sl or '', trade_status]
+            df.iloc[-1] = [timestamp, source, price_str, rsi_str, macd_str, ema_str, action, tp_str, sl_str, trade_status]
             df.to_csv(file_path, index=False)
             return
 
     with open(file_path, "a") as f:
-        f.write(f"{timestamp},{source},{price:.2f},{rsi:.2f},{macd:.4f},{ema:.2f},{action},{tp or ''},{sl or ''},{trade_status}\n")
+        f.write(f"{timestamp},{source},{price_str},{rsi_str},{macd_str},{ema_str},{action},{tp_str},{sl_str},{trade_status}\n")
+
 
 
 # === Load initial model ===
@@ -129,10 +140,14 @@ def predict(update: Update, context: CallbackContext):
                         trade_open = False
                         return
 
+                entry_price_str = f"{trade_entry_price:.2f}" if trade_entry_price is not None else "N/A"
+                tp_str = f"{current_tp:.2f}" if current_tp is not None else "N/A"
+                sl_str = f"{current_sl:.2f}" if current_sl is not None else "N/A"
+
                 msg = (
                     f"📊 Trade Open: {current_action}\n"
-                    f"💰 Entry Price: {trade_entry_price:.2f}\n"
-                    f"🎯 TP: {current_tp:.2f} | 🛑 SL: {current_sl:.2f}\n"
+                    f"💰 Entry Price: {entry_price_str}\n"
+                    f"🎯 TP: {tp_str} | 🛑 SL: {sl_str}\n"
                     f"📉 Current Price: {close_price:.2f}"
                 )
                 update.message.reply_text(msg)
@@ -254,15 +269,20 @@ def check_market_and_send_signal():
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-                if tp is not None and sl is not None:
-                    msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-                else:
-                    msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n📌 No TP/SL — holding"
+                tp_str = f"{tp:.2f}" if tp is not None else "N/A"
+                sl_str = f"{sl:.2f}" if sl is not None else "N/A"
+
+                msg = (
+                    f"📊 Auto Signal: {action_name}\n"
+                    f"💰 Price: {close_price:.2f}\n"
+                    f"🎯 TP: {tp_str} | 🛑 SL: {sl_str}"
+                )
                 bot.send_message(chat_id=CHAT_ID, text=msg)
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")
 
     except Exception as e:
         bot.send_message(chat_id=CHAT_ID, text=f"❌ Error during auto signal: {e}")
+
             
 def run_scheduler():
     # Set up the schedule for checking market and sending signals

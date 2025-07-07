@@ -142,8 +142,8 @@ def predict(update: Update, context: CallbackContext):
 
                 msg = (
                     f"📊 Trade Open: {current_action}\n"
-                    f"💰 Entry Price: {trade_entry_price:.2f if trade_entry_price else 'N/A'}\n"
-                    f"🎯 TP: {current_tp:.2f if current_tp else 'N/A'} | 🛑 SL: {current_sl:.2f if current_sl else 'N/A'}\n"
+                    f"💰 Entry Price: {trade_entry_price:.2f}\n"
+                    f"🎯 TP: {current_tp:.2f} | 🛑 SL: {current_sl:.2f}\n"
                     f"📉 Current Price: {close_price:.2f}"
                 )
                 update.message.reply_text(msg)
@@ -185,6 +185,7 @@ def predict(update: Update, context: CallbackContext):
 
     except Exception as e:
         update.message.reply_text(f"❌ Error during prediction: {e}")
+
 
 # === /export ===
 def export_log(update: Update, context: CallbackContext):
@@ -263,7 +264,7 @@ def check_market_and_send_signal():
                 msg = (
                     f"📊 Auto Signal: {action_name}\n"
                     f"💰 Price: {close_price:.2f}\n"
-                    f"🎯 TP: {tp:.2f if tp else 'N/A'} | 🛑 SL: {sl:.2f if sl else 'N/A'}"
+                    f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
                 )
                 bot.send_message(chat_id=CHAT_ID, text=msg)
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")

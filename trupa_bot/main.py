@@ -40,29 +40,39 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual",
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_path = "signal_log.csv"
 
+    # Create the CSV file with headers if it doesn't exist
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
             f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
 
-    def safe_str(val, fmt):
+    # Helper to safely cast to float or empty string for CSV logging
+    def safe_float_str(val, fmt="{:.2f}"):
         return fmt.format(val) if val is not None else ""
 
-    price_str = safe_str(price, "{:.2f}")
-    rsi_str = safe_str(rsi, "{:.2f}")
-    macd_str = safe_str(macd, "{:.4f}")
-    ema_str = safe_str(ema, "{:.2f}")
-    tp_str = safe_str(tp, "{:.2f}")
-    sl_str = safe_str(sl, "{:.2f}")
-
     if update_last:
-        df = pd.read_csv(file_path)
-        if len(df) > 0 and df.iloc[-1]['status'] == "open":
-            df.iloc[-1] = [timestamp, source, price_str, rsi_str, macd_str, ema_str, action, tp_str, sl_str, trade_status]
-            df.to_csv(file_path, index=False)
-            return
+        try:
+            df = pd.read_csv(file_path)
+            if len(df) > 0 and df.iloc[-1]['status'] == "open":
+                df.iloc[-1] = [
+                    timestamp,
+                    source,
+                    price if price is not None else "",
+                    rsi if rsi is not None else "",
+                    macd if macd is not None else "",
+                    ema if ema is not None else "",
+                    action,
+                    tp if tp is not None else "",
+                    sl if sl is not None else "",
+                    trade_status
+                ]
+                df.to_csv(file_path, index=False)
+                return
+        except Exception as e:
+            print(f"⚠️ Error updating last log row: {e}")
 
+    # Append a new row with formatted float strings
     with open(file_path, "a") as f:
-        f.write(f"{timestamp},{source},{price_str},{rsi_str},{macd_str},{ema_str},{action},{tp_str},{sl_str},{trade_status}\n")
+        f.write(f"{timestamp},{source},{safe_float_str(price)},{safe_float_str(rsi)},{safe_float_str(macd, '{:.4f}')},{safe_float_str(ema)},{action},{safe_float_str(tp)},{safe_float_str(sl)},{trade_status}\n")
 
 
 # === Load initial model ===

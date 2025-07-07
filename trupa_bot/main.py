@@ -2,7 +2,9 @@ import logging
 import pandas as pd
 import datetime
 import os
-from telegram import Bot, Update, InputFile
+from zipfile import ZipFile
+import gdown
+from telegram import Bot, Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
 from flask import Flask, request
 from stable_baselines3 import PPO
@@ -21,6 +23,15 @@ def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
     dp.process_update(update)
     return "OK", 200
+
+# === Download model files if missing ===
+if not os.path.exists("gold_ppo_model_retrained.zip"):
+    gdown.download(id="1t4wHEXStdKQX7mtDxAWE8eYtxSvkloXq", output="gold_ppo_model_retrained.zip", quiet=False)
+    with ZipFile("gold_ppo_model_retrained.zip", 'r') as zip_ref:
+        zip_ref.extractall(".")
+
+if not os.path.exists("vec_normalize.pkl"):
+    gdown.download(id="1p6LOB3pM5-YhgNrLgF68X9dFT_hjhSqR", output="vec_normalize.pkl", quiet=False)
 
 # === Load Model and VecNormalize ===
 dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])

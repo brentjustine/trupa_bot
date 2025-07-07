@@ -191,7 +191,6 @@ def export_log(update: Update, context: CallbackContext):
 
 # === Auto Signal ===
 def check_market_and_send_signal():
-def check_market_and_send_signal():
     global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp
     try:
         with trade_lock:

@@ -144,14 +144,13 @@ def predict(update: Update, context: CallbackContext):
             action, _states = model.predict(state, deterministic=True)
             action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
 
+            tp = sl = None
             if action_name == "Buy":
                 tp = close_price + 4.0
                 sl = close_price - 3.0
             elif action_name == "Sell":
                 tp = close_price - 4.0
                 sl = close_price + 3.0
-            else:
-                tp = sl = None
 
             if action_name != "Hold":
                 trade_open = True
@@ -239,14 +238,13 @@ def check_market_and_send_signal():
             action, _states = model.predict(state, deterministic=True)
             action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
 
+            tp = sl = None
             if action_name == "Buy":
                 tp = close_price + 4.0
                 sl = close_price - 3.0
             elif action_name == "Sell":
                 tp = close_price - 4.0
                 sl = close_price + 3.0
-            else:
-                tp = sl = None
 
             if action_name != "Hold" and not trade_open:
                 trade_open = True
@@ -260,7 +258,6 @@ def check_market_and_send_signal():
                     msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
                 else:
                     msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n📌 No TP/SL — holding"
-
                 bot.send_message(chat_id=CHAT_ID, text=msg)
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")
 

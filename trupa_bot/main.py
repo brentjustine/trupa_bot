@@ -91,63 +91,68 @@ def start(update: Update, context: CallbackContext):
 
 # === /predict ===
 def predict(update: Update, context: CallbackContext):
-    global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp  # Declare globals at the top
+    global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp
     try:
-        with trade_lock:  # Ensure that the global state is thread-safe
-            if trade_open:
-                # If a trade is open, check for TP or SL hit with a 0.3 spread
-                current_price = add_indicators(fetch_data_twelvedata()).iloc[-1]['close']
-                
-                # Check if TP or SL is hit
-                if (current_action == "Buy" and (current_price >= current_tp - 0.3 and current_price <= current_tp + 0.3)) or \
-                   (current_action == "Sell" and (current_price >= current_sl - 0.3 and current_price <= current_sl + 0.3)):
-                    # Notify that TP/SL is hit
-                    bot.send_message(chat_id=CHAT_ID, text=f"🔔 {current_action} TP/SL hit!")
-                    # Log trade exit status
-                    log_signal(current_action, current_price, None, None, None, current_tp, current_sl, trade_exit_status="TP/SL Hit")
-                    trade_open = False  # Reset trade state
-                    return
+        with trade_lock:
+            df_live = add_indicators(fetch_data_twelvedata())
+            latest = df_live.iloc[-1]
+            close_price = latest['close']
+            high = latest['high']
+            low = latest['low']
+            rsi = latest['rsi']
+            macd = latest['macd']
+            ema_50 = latest['ema_50']
+            spread = 0.3
 
-                # Notify the current trade status if TP/SL hasn't been hit yet
+            if trade_open:
+                if current_action == "Buy":
+                    if high >= current_tp + spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🎯 Buy TP hit (spread-adjusted)!")
+                        log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
+                        trade_open = False
+                        return
+                    elif low <= current_sl - spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🛑 Buy SL hit (spread-adjusted)!")
+                        log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
+                        trade_open = False
+                        return
+
+                elif current_action == "Sell":
+                    if low <= current_tp - spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🎯 Sell TP hit (spread-adjusted)!")
+                        log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
+                        trade_open = False
+                        return
+                    elif high >= current_sl + spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🛑 Sell SL hit (spread-adjusted)!")
+                        log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
+                        trade_open = False
+                        return
+
                 msg = (
                     f"📊 Trade Open: {current_action}\n"
                     f"💰 Entry Price: {trade_entry_price:.2f}\n"
                     f"🎯 TP: {current_tp:.2f} | 🛑 SL: {current_sl:.2f}\n"
-                    f"📉 Current Price: {current_price:.2f}\n"
+                    f"📉 Current Price: {close_price:.2f}"
                 )
                 update.message.reply_text(msg)
                 return
 
-            # Fetch live data and add indicators
-            df_live = add_indicators(fetch_data_twelvedata())
-            latest = df_live.iloc[-1]
-            close_price = latest['close']
-            rsi = latest['rsi']
-            macd = latest['macd']
-            ema_50 = latest['ema_50']
-
-            # Prepare data for model prediction
-            state = df_live.iloc[-1]  # Don't drop 'close', keep all features (18 features)
-            state = state.values.reshape(1, -1)  # Convert to 2D array for model input
-
-            # Normalize the state using the vec_env (VecNormalize)
-            state = vec_env.normalize_obs(state)  # Normalize the observation
-
-            # Get model prediction (action)
+            # Predict new signal
+            state = latest.values.reshape(1, -1)
+            state = vec_env.normalize_obs(state)
             action, _states = model.predict(state, deterministic=True)
             action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
 
-            # Set TP and SL based on action
             if action_name == "Buy":
-                tp = close_price + 4.0  # Fixed TP of $4
-                sl = close_price - 3.0  # Fixed SL of $3
+                tp = close_price + 4.0
+                sl = close_price - 3.0
             elif action_name == "Sell":
-                tp = close_price - 4.0  # Fixed TP of $4
-                sl = close_price + 3.0  # Fixed SL of $3
+                tp = close_price - 4.0
+                sl = close_price + 3.0
             else:
-                tp = sl = None  # No TP/SL for holding
+                tp = sl = None
 
-            # Save trade state only if the action is "Buy" or "Sell"
             if action_name != "Hold":
                 trade_open = True
                 current_action = action_name
@@ -156,38 +161,21 @@ def predict(update: Update, context: CallbackContext):
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-            # Prepare message to send to Telegram
-            if action_name in ["Buy", "Sell"]:
-                tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-            else:
-                tp_sl_line = "📌 No TP/SL — holding"
-
+            tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}" if tp and sl else "📌 No TP/SL — holding"
             msg = (
                 f"📊 Live Signal: {action_name}\n"
                 f"💰 Price: {close_price:.2f}\n"
                 f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}\n"
                 f"{tp_sl_line}"
             )
-
-            # Send message via Telegram
             update.message.reply_text(msg)
 
-            # Log the signal only if it's not a "Hold"
             if action_name != "Hold":
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="manual-live")
 
-            # Check if TP or SL is hit right after prediction
-            if (action_name == "Buy" and (close_price >= tp - 0.3 and close_price <= tp + 0.3)) or \
-               (action_name == "Sell" and (close_price >= sl - 0.3 and close_price <= sl + 0.3)):
-                # Notify that TP/SL is hit immediately after prediction
-                bot.send_message(chat_id=CHAT_ID, text=f"🔔 {action_name} TP/SL hit!")
-                # Log trade exit status
-                log_signal(action_name, close_price, None, None, None, tp, sl, trade_exit_status="TP/SL Hit")
-                trade_open = False  # Reset trade state
-
     except Exception as e:
         update.message.reply_text(f"❌ Error during prediction: {e}")
-        
+
 # === /export ===
 def export_log(update: Update, context: CallbackContext):
     try:
@@ -203,51 +191,60 @@ def export_log(update: Update, context: CallbackContext):
 
 # === Auto Signal ===
 def check_market_and_send_signal():
-    global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp  # Declare globals at the top
+def check_market_and_send_signal():
+    global trade_open, current_action, current_tp, current_sl, trade_entry_price, trade_timestamp
     try:
-        with trade_lock:  # Ensure that the global state is thread-safe
-            # If a trade is already open, check for TP or SL hit with a 0.3 spread
-            if trade_open:
-                current_price = add_indicators(fetch_data_twelvedata()).iloc[-1]['close']
-                
-                # Check if the price is within 0.3 of TP or SL
-                if (current_action == "Buy" and (current_price >= current_tp - 0.3 and current_price <= current_tp + 0.3)) or \
-                   (current_action == "Sell" and (current_price >= current_sl - 0.3 and current_price <= current_sl + 0.3)):
-                    # Notify that TP/SL is hit
-                    bot.send_message(chat_id=CHAT_ID, text=f"🔔 {current_action} TP/SL hit!")
-                    # Log trade exit status
-                    log_signal(current_action, current_price, None, None, None, current_tp, current_sl, trade_exit_status="TP/SL Hit")
-                    trade_open = False  # Reset trade state
-                    return
-
-            # Fetch live data and add indicators
+        with trade_lock:
             df_live = add_indicators(fetch_data_twelvedata())
             latest = df_live.iloc[-1]
             close_price = latest['close']
+            high = latest['high']
+            low = latest['low']
             rsi = latest['rsi']
             macd = latest['macd']
             ema_50 = latest['ema_50']
+            spread = 0.3
 
-            # Prepare data for model prediction
-            state = df_live.iloc[-1]  # Don't drop 'close', keep all features
-            state = state.values.reshape(1, -1)  # Convert to 2D array for model input
-            state = vec_env.normalize_obs(state)  # Normalize the observation
+            if trade_open:
+                if current_action == "Buy":
+                    if high >= current_tp + spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🎯 Buy TP hit (spread-adjusted)!")
+                        log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
+                        trade_open = False
+                        return
+                    elif low <= current_sl - spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🛑 Buy SL hit (spread-adjusted)!")
+                        log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
+                        trade_open = False
+                        return
 
-            # Get model prediction (action)
+                elif current_action == "Sell":
+                    if low <= current_tp - spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🎯 Sell TP hit (spread-adjusted)!")
+                        log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
+                        trade_open = False
+                        return
+                    elif high >= current_sl + spread:
+                        bot.send_message(chat_id=CHAT_ID, text="🛑 Sell SL hit (spread-adjusted)!")
+                        log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
+                        trade_open = False
+                        return
+
+            # Predict new signal
+            state = latest.values.reshape(1, -1)
+            state = vec_env.normalize_obs(state)
             action, _states = model.predict(state, deterministic=True)
             action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
 
-            # Set TP and SL based on action
             if action_name == "Buy":
-                tp = close_price + 4.0  # Fixed TP of $4
-                sl = close_price - 3.0  # Fixed SL of $3
+                tp = close_price + 4.0
+                sl = close_price - 3.0
             elif action_name == "Sell":
-                tp = close_price - 4.0  # Fixed TP of $4
-                sl = close_price + 3.0  # Fixed SL of $3
+                tp = close_price - 4.0
+                sl = close_price + 3.0
             else:
                 tp = sl = None
 
-            # If new trade action and not "Hold", log it and send signal
             if action_name != "Hold" and not trade_open:
                 trade_open = True
                 current_action = action_name
@@ -256,7 +253,6 @@ def check_market_and_send_signal():
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-                # Send message and log the signal
                 msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
                 bot.send_message(chat_id=CHAT_ID, text=msg)
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")

@@ -275,7 +275,16 @@ def run_scheduler():
     while True:
         schedule.run_pending()
         time.sleep(1)
-
+# === Clear Log File ===
+def clear_log_file():
+    log_file_path = "signal_log.csv"
+    if os.path.exists(log_file_path):
+        try:
+            os.remove(log_file_path)
+            print(f"✅ Log file '{log_file_path}' cleared.")
+        except Exception as e:
+            print(f"❌ Error while clearing log file: {e}")
+            
 if __name__ == "__main__":
     # Clear the log file on each re-run
     clear_log_file()  # This will delete the log file every time the script starts

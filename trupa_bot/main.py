@@ -15,6 +15,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from trading_env import TPSSLTradingEnv, add_indicators, fetch_data_twelvedata
 
 app = Flask(__name__)
+
 @app.route("/")
 def home():
     return "✅ Gold Trading Bot is alive!\nVisit: https://trupa-bot.onrender.com", 200
@@ -22,7 +23,7 @@ def home():
 @app.route(f"/{os.getenv('TELEGRAM_TOKEN')}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    dp.process_update(update)  # Use dp instead of dispatcher
+    dp.process_update(update)
     return "OK", 200
 
 # === Download model files if missing ===
@@ -39,18 +40,19 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual",
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_path = "signal_log.csv"
 
-    # Create header if the file doesn't exist
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
             f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
 
-    # Format safely even if values are None
-    price_str = f"{price:.2f}" if price is not None else ""
-    rsi_str = f"{rsi:.2f}" if rsi is not None else ""
-    macd_str = f"{macd:.4f}" if macd is not None else ""
-    ema_str = f"{ema:.2f}" if ema is not None else ""
-    tp_str = f"{tp:.2f}" if tp is not None else ""
-    sl_str = f"{sl:.2f}" if sl is not None else ""
+    def safe_str(val, fmt):
+        return fmt.format(val) if val is not None else ""
+
+    price_str = safe_str(price, "{:.2f}")
+    rsi_str = safe_str(rsi, "{:.2f}")
+    macd_str = safe_str(macd, "{:.4f}")
+    ema_str = safe_str(ema, "{:.2f}")
+    tp_str = safe_str(tp, "{:.2f}")
+    sl_str = safe_str(sl, "{:.2f}")
 
     if update_last:
         df = pd.read_csv(file_path)
@@ -62,10 +64,8 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual",
     with open(file_path, "a") as f:
         f.write(f"{timestamp},{source},{price_str},{rsi_str},{macd_str},{ema_str},{action},{tp_str},{sl_str},{trade_status}\n")
 
-
-
 # === Load initial model ===
-dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])  # Change here
+dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])
 vec_env = VecNormalize.load("vec_normalize.pkl", dummy_env)
 vec_env.training = False
 vec_env.norm_reward = False
@@ -76,8 +76,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# === Global Trade State with Lock ===
-trade_lock = threading.Lock()  # Threading lock to ensure thread-safety for global variables
+# === Global Trade State ===
+trade_lock = threading.Lock()
 trade_open = False
 current_action = None
 current_tp = None
@@ -140,20 +140,15 @@ def predict(update: Update, context: CallbackContext):
                         trade_open = False
                         return
 
-                entry_price_str = f"{trade_entry_price:.2f}" if trade_entry_price is not None else "N/A"
-                tp_str = f"{current_tp:.2f}" if current_tp is not None else "N/A"
-                sl_str = f"{current_sl:.2f}" if current_sl is not None else "N/A"
-
                 msg = (
                     f"📊 Trade Open: {current_action}\n"
-                    f"💰 Entry Price: {entry_price_str}\n"
-                    f"🎯 TP: {tp_str} | 🛑 SL: {sl_str}\n"
+                    f"💰 Entry Price: {trade_entry_price:.2f if trade_entry_price else 'N/A'}\n"
+                    f"🎯 TP: {current_tp:.2f if current_tp else 'N/A'} | 🛑 SL: {current_sl:.2f if current_sl else 'N/A'}\n"
                     f"📉 Current Price: {close_price:.2f}"
                 )
                 update.message.reply_text(msg)
                 return
 
-            # Predict new signal
             state = latest.values.reshape(1, -1)
             state = vec_env.normalize_obs(state)
             action, _states = model.predict(state, deterministic=True)
@@ -175,10 +170,7 @@ def predict(update: Update, context: CallbackContext):
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-            if tp is not None and sl is not None:
-                tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
-            else:
-                tp_sl_line = "📌 No TP/SL — holding"
+            tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}" if tp and sl else "📌 No TP/SL — holding"
 
             msg = (
                 f"📊 Live Signal: {action_name}\n"
@@ -247,7 +239,6 @@ def check_market_and_send_signal():
                         trade_open = False
                         return
 
-            # Predict new signal
             state = latest.values.reshape(1, -1)
             state = vec_env.normalize_obs(state)
             action, _states = model.predict(state, deterministic=True)
@@ -269,13 +260,10 @@ def check_market_and_send_signal():
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-                tp_str = f"{tp:.2f}" if tp is not None else "N/A"
-                sl_str = f"{sl:.2f}" if sl is not None else "N/A"
-
                 msg = (
                     f"📊 Auto Signal: {action_name}\n"
                     f"💰 Price: {close_price:.2f}\n"
-                    f"🎯 TP: {tp_str} | 🛑 SL: {sl_str}"
+                    f"🎯 TP: {tp:.2f if tp else 'N/A'} | 🛑 SL: {sl:.2f if sl else 'N/A'}"
                 )
                 bot.send_message(chat_id=CHAT_ID, text=msg)
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")
@@ -283,16 +271,12 @@ def check_market_and_send_signal():
     except Exception as e:
         bot.send_message(chat_id=CHAT_ID, text=f"❌ Error during auto signal: {e}")
 
-            
 def run_scheduler():
-    # Set up the schedule for checking market and sending signals
-    schedule.every(15).minutes.do(check_market_and_send_signal)  # Run every 15 minutes
-    
-    # Run the scheduler in an infinite loop
+    schedule.every(15).minutes.do(check_market_and_send_signal)
     while True:
         schedule.run_pending()
         time.sleep(1)
-# === Clear Log File ===
+
 def clear_log_file():
     log_file_path = "signal_log.csv"
     if os.path.exists(log_file_path):
@@ -301,23 +285,17 @@ def clear_log_file():
             print(f"✅ Log file '{log_file_path}' cleared.")
         except Exception as e:
             print(f"❌ Error while clearing log file: {e}")
-            
-if __name__ == "__main__":
-    # Clear the log file on each re-run
-    clear_log_file()  # This will delete the log file every time the script starts
 
-    # Initialize the updater and dispatcher for Telegram bot commands
+if __name__ == "__main__":
+    clear_log_file()
+
     updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("predict", predict))
     dp.add_handler(CommandHandler("export", export_log))
 
-    # Set webhook for Telegram bot
     bot.set_webhook(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}")
 
-    # Start the scheduler in a separate thread
     threading.Thread(target=run_scheduler, daemon=True).start()
-
-    # Start Flask app
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

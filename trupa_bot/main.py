@@ -44,33 +44,26 @@ def log_signal(action, price, rsi, macd, ema, tp=None, sl=None, source="manual",
         with open(file_path, "w") as f:
             f.write("datetime,source,price,rsi,macd,ema,action,tp,sl,status\n")
 
-    def safe_float(val):
-        return round(float(val), 6) if val is not None else ""
-
-    if update_last:
-        df = pd.read_csv(file_path)
-        if len(df) > 0:
-            df.iloc[-1] = [
-                timestamp,
-                source,
-                safe_float(price),
-                safe_float(rsi),
-                safe_float(macd),
-                safe_float(ema),
-                action,
-                safe_float(tp),
-                safe_float(sl),
-                trade_status
-            ]
-            df.to_csv(file_path, index=False)
-            return
-
-    # For appending, keep using strings
     def safe_str(val, fmt):
         return fmt.format(val) if val is not None else ""
 
+    price_str = safe_str(price, "{:.2f}")
+    rsi_str = safe_str(rsi, "{:.2f}")
+    macd_str = safe_str(macd, "{:.4f}")
+    ema_str = safe_str(ema, "{:.2f}")
+    tp_str = safe_str(tp, "{:.2f}")
+    sl_str = safe_str(sl, "{:.2f}")
+
+    if update_last:
+        df = pd.read_csv(file_path)
+        if len(df) > 0 and df.iloc[-1]['status'] == "open":
+            df.iloc[-1] = [timestamp, source, price_str, rsi_str, macd_str, ema_str, action, tp_str, sl_str, trade_status]
+            df.to_csv(file_path, index=False)
+            return
+
     with open(file_path, "a") as f:
-        f.write(f"{timestamp},{source},{safe_str(price, '{:.2f}')},{safe_str(rsi, '{:.2f}')},{safe_str(macd, '{:.4f}')},{safe_str(ema, '{:.2f}')},{action},{safe_str(tp, '{:.2f}')},{safe_str(sl, '{:.2f}')},{trade_status}\n")
+        f.write(f"{timestamp},{source},{price_str},{rsi_str},{macd_str},{ema_str},{action},{tp_str},{sl_str},{trade_status}\n")
+
 
 # === Load initial model ===
 dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])
@@ -226,28 +219,57 @@ def check_market_and_send_signal():
             if trade_open:
                 if current_action == "Buy":
                     if high >= current_tp - spread:
-                        bot.send_message(chat_id=CHAT_ID, text="🎯 Buy TP hit (spread-adjusted)!")
-                        log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
+                        bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=(
+                                "🎯 Buy TP hit (spread-adjusted)!\n"
+                                f"💰 Price: {close_price:.2f}\n"
+                                f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}"
+                            )
+                        )
+                        log_signal("Buy", close_price, rsi, macd, ema_50, current_tp, current_sl, trade_status="TP Hit", update_last=True)
                         trade_open = False
                         return
                     elif low <= current_sl + spread:
-                        bot.send_message(chat_id=CHAT_ID, text="🛑 Buy SL hit (spread-adjusted)!")
-                        log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
+                        bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=(
+                                "🛑 Buy SL hit (spread-adjusted)!\n"
+                                f"💰 Price: {close_price:.2f}\n"
+                                f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}"
+                            )
+                        )
+                        log_signal("Buy", close_price, rsi, macd, ema_50, current_tp, current_sl, trade_status="SL Hit", update_last=True)
                         trade_open = False
                         return
 
                 elif current_action == "Sell":
                     if low <= current_tp + spread:
-                        bot.send_message(chat_id=CHAT_ID, text="🎯 Sell TP hit (spread-adjusted)!")
-                        log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
+                        bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=(
+                                "🎯 Sell TP hit (spread-adjusted)!\n"
+                                f"💰 Price: {close_price:.2f}\n"
+                                f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}"
+                            )
+                        )
+                        log_signal("Sell", close_price, rsi, macd, ema_50, current_tp, current_sl, trade_status="TP Hit", update_last=True)
                         trade_open = False
                         return
                     elif high >= current_sl - spread:
-                        bot.send_message(chat_id=CHAT_ID, text="🛑 Sell SL hit (spread-adjusted)!")
-                        log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
+                        bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=(
+                                "🛑 Sell SL hit (spread-adjusted)!\n"
+                                f"💰 Price: {close_price:.2f}\n"
+                                f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}"
+                            )
+                        )
+                        log_signal("Sell", close_price, rsi, macd, ema_50, current_tp, current_sl, trade_status="SL Hit", update_last=True)
                         trade_open = False
                         return
 
+            # === New Signal Generation ===
             state = latest.values.reshape(1, -1)
             state = vec_env.normalize_obs(state)
             action, _states = model.predict(state, deterministic=True)
@@ -272,6 +294,7 @@ def check_market_and_send_signal():
                 msg = (
                     f"📊 Auto Signal: {action_name}\n"
                     f"💰 Price: {close_price:.2f}\n"
+                    f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}\n"
                     f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
                 )
                 bot.send_message(chat_id=CHAT_ID, text=msg)
@@ -279,6 +302,7 @@ def check_market_and_send_signal():
 
     except Exception as e:
         bot.send_message(chat_id=CHAT_ID, text=f"❌ Error during auto signal: {e}")
+
 
 def run_scheduler():
     schedule.every(15).minutes.do(check_market_and_send_signal)

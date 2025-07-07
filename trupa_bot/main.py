@@ -106,24 +106,24 @@ def predict(update: Update, context: CallbackContext):
 
             if trade_open:
                 if current_action == "Buy":
-                    if high >= current_tp + spread:
+                    if high >= current_tp - spread:
                         bot.send_message(chat_id=CHAT_ID, text="🎯 Buy TP hit (spread-adjusted)!")
                         log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
                         trade_open = False
                         return
-                    elif low <= current_sl - spread:
+                    elif low <= current_sl + spread:
                         bot.send_message(chat_id=CHAT_ID, text="🛑 Buy SL hit (spread-adjusted)!")
                         log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
                         trade_open = False
                         return
 
                 elif current_action == "Sell":
-                    if low <= current_tp - spread:
+                    if low <= current_tp + spread:
                         bot.send_message(chat_id=CHAT_ID, text="🎯 Sell TP hit (spread-adjusted)!")
                         log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
                         trade_open = False
                         return
-                    elif high >= current_sl + spread:
+                    elif high >= current_sl - spread:
                         bot.send_message(chat_id=CHAT_ID, text="🛑 Sell SL hit (spread-adjusted)!")
                         log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
                         trade_open = False
@@ -161,7 +161,11 @@ def predict(update: Update, context: CallbackContext):
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-            tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}" if tp and sl else "📌 No TP/SL — holding"
+            if tp is not None and sl is not None:
+                tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
+            else:
+                tp_sl_line = "📌 No TP/SL — holding"
+
             msg = (
                 f"📊 Live Signal: {action_name}\n"
                 f"💰 Price: {close_price:.2f}\n"
@@ -206,24 +210,24 @@ def check_market_and_send_signal():
 
             if trade_open:
                 if current_action == "Buy":
-                    if high >= current_tp + spread:
+                    if high >= current_tp - spread:
                         bot.send_message(chat_id=CHAT_ID, text="🎯 Buy TP hit (spread-adjusted)!")
                         log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
                         trade_open = False
                         return
-                    elif low <= current_sl - spread:
+                    elif low <= current_sl + spread:
                         bot.send_message(chat_id=CHAT_ID, text="🛑 Buy SL hit (spread-adjusted)!")
                         log_signal("Buy", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
                         trade_open = False
                         return
 
                 elif current_action == "Sell":
-                    if low <= current_tp - spread:
+                    if low <= current_tp + spread:
                         bot.send_message(chat_id=CHAT_ID, text="🎯 Sell TP hit (spread-adjusted)!")
                         log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="TP Hit", update_last=True)
                         trade_open = False
                         return
-                    elif high >= current_sl + spread:
+                    elif high >= current_sl - spread:
                         bot.send_message(chat_id=CHAT_ID, text="🛑 Sell SL hit (spread-adjusted)!")
                         log_signal("Sell", close_price, None, None, None, current_tp, current_sl, trade_status="SL Hit", update_last=True)
                         trade_open = False
@@ -252,22 +256,16 @@ def check_market_and_send_signal():
                 trade_entry_price = close_price
                 trade_timestamp = datetime.datetime.now()
 
-                msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
+                if tp is not None and sl is not None:
+                    msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}"
+                else:
+                    msg = f"📊 Auto Signal: {action_name}\n💰 Price: {close_price:.2f}\n📌 No TP/SL — holding"
+
                 bot.send_message(chat_id=CHAT_ID, text=msg)
                 log_signal(action_name, close_price, rsi, macd, ema_50, tp, sl, source="auto")
 
     except Exception as e:
         bot.send_message(chat_id=CHAT_ID, text=f"❌ Error during auto signal: {e}")
-
-# === Clear Log File ===
-def clear_log_file():
-    log_file_path = "signal_log.csv"
-    if os.path.exists(log_file_path):
-        try:
-            os.remove(log_file_path)
-            print(f"✅ Log file '{log_file_path}' cleared.")
-        except Exception as e:
-            print(f"❌ Error while clearing log file: {e}")
             
 def run_scheduler():
     # Set up the schedule for checking market and sending signals

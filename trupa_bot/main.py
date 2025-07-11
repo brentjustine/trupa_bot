@@ -1,104 +1,171 @@
-import logging
-import pandas as pd
-import datetime
 import os
-from zipfile import ZipFile
-import gdown
-from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+import time
+import numpy as np
+import pandas as pd
+import requests
 from flask import Flask, request
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from trading_env import TPSSLTradingEnv, add_indicators, fetch_data_twelvedata
+import telegram
+from telegram.ext import Dispatcher, CommandHandler
+
+# === Environment Variables ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+
+# === Telegram Bot Initialization ===
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+
+# === Dynamic TP/SL Generator ===
+def generate_dynamic_tp_sl(entry, direction, atr, rr=2.0, strategy=None):
+    strategy_rr = {
+        "breakout": 2.0,
+        "rsi_reversal": 1.5,
+        "engulfing": 1.5,
+        "grid_bias": 1.2,
+        "squeeze": 2.5
+    }
+    rr = strategy_rr.get(strategy, rr)
+    if direction == "buy":
+        tp = entry + atr * rr
+        sl = entry - atr * 1.0
+    else:
+        tp = entry - atr * rr
+        sl = entry + atr * 1.0
+    return tp, sl
+
+# === Strategy Definitions ===
+def breakout_signal(df, i, lookback=50):
+    if i < lookback: return None
+    recent_high = df["high"].iloc[i - lookback:i].max()
+    high = df["high"].iloc[i]
+    close = df["close"].iloc[i]
+    atr = (df["high"] - df["low"]).rolling(14).mean().iloc[i]
+    if high > recent_high:
+        tp, sl = generate_dynamic_tp_sl(close, "buy", atr, strategy="breakout")
+        return {"direction": "buy", "confidence": 0.85, "entry": close, "tp": tp, "sl": sl, "strategy": "breakout"}
+    return None
+
+def rsi_reversal_signal(df, i, rsi_period=14, overbought=70, oversold=30):
+    if i < rsi_period: return None
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(rsi_period).mean()
+    loss = -delta.clip(upper=0).rolling(rsi_period).mean()
+    rs = gain / (loss + 1e-6)
+    rsi = 100 - (100 / (1 + rs))
+    current_rsi = rsi.iloc[i]
+    close = df["close"].iloc[i]
+    atr = (df["high"] - df["low"]).rolling(14).mean().iloc[i]
+    if current_rsi < oversold:
+        tp, sl = generate_dynamic_tp_sl(close, "buy", atr, strategy="rsi_reversal")
+        return {"direction": "buy", "confidence": 0.75, "entry": close, "tp": tp, "sl": sl, "strategy": "rsi_reversal"}
+    elif current_rsi > overbought:
+        tp, sl = generate_dynamic_tp_sl(close, "sell", atr, strategy="rsi_reversal")
+        return {"direction": "sell", "confidence": 0.75, "entry": close, "tp": tp, "sl": sl, "strategy": "rsi_reversal"}
+    return None
+
+def grid_bias_signal(df, i, grid_size=5):
+    if i < grid_size: return None
+    midline = df["close"].rolling(grid_size).mean().iloc[i]
+    close = df["close"].iloc[i]
+    atr = (df["high"] - df["low"]).rolling(14).mean().iloc[i]
+    if close < midline * 0.995:
+        tp, sl = generate_dynamic_tp_sl(close, "buy", atr, strategy="grid_bias")
+        return {"direction": "buy", "confidence": 0.7, "entry": close, "tp": tp, "sl": sl, "strategy": "grid_bias"}
+    elif close > midline * 1.005:
+        tp, sl = generate_dynamic_tp_sl(close, "sell", atr, strategy="grid_bias")
+        return {"direction": "sell", "confidence": 0.7, "entry": close, "tp": tp, "sl": sl, "strategy": "grid_bias"}
+    return None
+
+def engulfing_signal(df, i):
+    if i < 2: return None
+    o1, c1 = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
+    o2, c2 = df["open"].iloc[i], df["close"].iloc[i]
+    atr = (df["high"] - df["low"]).rolling(14).mean().iloc[i]
+    if c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1:
+        tp, sl = generate_dynamic_tp_sl(c2, "buy", atr, strategy="engulfing")
+        return {"direction": "buy", "confidence": 0.65, "entry": c2, "tp": tp, "sl": sl, "strategy": "engulfing"}
+    elif c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1:
+        tp, sl = generate_dynamic_tp_sl(c2, "sell", atr, strategy="engulfing")
+        return {"direction": "sell", "confidence": 0.65, "entry": c2, "tp": tp, "sl": sl, "strategy": "engulfing"}
+    return None
+
+def squeeze_signal(df, i, short=10, long=30):
+    if i < long: return None
+    short_range = (df["high"] - df["low"]).rolling(short).mean().iloc[i]
+    long_range = (df["high"] - df["low"]).rolling(long).mean().iloc[i]
+    atr = (df["high"] - df["low"]).rolling(14).mean().iloc[i]
+    close = df["close"].iloc[i]
+    if short_range < 0.5 * long_range:
+        direction = "buy" if close > df["close"].iloc[i - 1] else "sell"
+        tp, sl = generate_dynamic_tp_sl(close, direction, atr, strategy="squeeze")
+        return {"direction": direction, "confidence": 0.7, "entry": close, "tp": tp, "sl": sl, "strategy": "squeeze"}
+    return None
+
+def generate_ensemble_signal(df, i):
+    strategies = [
+        breakout_signal, rsi_reversal_signal, grid_bias_signal,
+        engulfing_signal, squeeze_signal
+    ]
+    signals = [s(df, i) for s in strategies if s(df, i)]
+    if not signals: return None
+    best = max(signals, key=lambda x: x["confidence"])
+    best["strategy_votes"] = len(signals)
+    return best
+
+def fetch_data(symbol="XAU/USD", interval="5min", apikey=None):
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={apikey}&outputsize=500"
+    response = requests.get(url)
+    data = response.json()
+    if "values" not in data:
+        raise Exception("❌ Data fetch failed.")
+    df = pd.DataFrame(data["values"])
+    df = df.rename(columns=str.lower)
+    for col in ["open", "high", "low", "close"]:
+        df[col] = df[col].astype(float)
+    df = df.sort_values("datetime").reset_index(drop=True)
+    return df.rename(columns={"datetime": "timestamp"})
+
+def send_telegram_signal(signal):
+    if not signal: return
+    msg = f"\u2705 Signal at {signal['timestamp']}\nStrategy: {signal['strategy']}\nDirection: {signal['direction']}\nEntry: {round(signal['entry'], 2)}\nTP: {round(signal['tp'], 2)}\nSL: {round(signal['sl'], 2)}\nConfidence: {signal['confidence']}\nVotes: {signal['strategy_votes']}"
+    bot.send_message(chat_id=CHAT_ID, text=msg)
 
 # === Flask App ===
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "✅ Gold Trading Bot is alive!\nVisit: https://trupa-bot.onrender.com", 200
-
-@app.route(f"/{os.getenv('TELEGRAM_TOKEN')}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dp.process_update(update)
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
     return "OK", 200
 
-# === Download model files if missing ===
-if not os.path.exists("gold_ppo_model_retrained.zip"):
-    gdown.download(id="1t4wHEXStdKQX7mtDxAWE8eYtxSvkloXq", output="gold_ppo_model_retrained.zip", quiet=False)
-    with ZipFile("gold_ppo_model_retrained.zip", 'r') as zip_ref:
-        zip_ref.extractall(".")
-
-if not os.path.exists("vec_normalize.pkl"):
-    gdown.download(id="1p6LOB3pM5-YhgNrLgF68X9dFT_hjhSqR", output="vec_normalize.pkl", quiet=False)
-
-# === Load Model and VecNormalize ===
-dummy_env = DummyVecEnv([lambda: TPSSLTradingEnv(add_indicators(fetch_data_twelvedata()))])
-vec_env = VecNormalize.load("vec_normalize.pkl", dummy_env)
-vec_env.training = False
-vec_env.norm_reward = False
-model = PPO.load("gold_ppo_model_retrained", env=vec_env)
-
-# === Telegram Setup ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# === /start Command ===
-def start(update: Update, context: CallbackContext):
-    welcome_msg = (
-        "🤖 *Welcome to the Gold Trading Bot!*\n\n"
-        "This bot uses a trained RL AI to generate real-time trading signals for *XAU/USD*.\n\n"
-        "📌 *Available Commands:*\n"
-        "• /predict — Get the latest AI signal using live market data\n"
-        "• /start — Show this help message\n\n"
-        f"🆔 *Your Chat ID:* `{update.message.chat_id}`"
-    )
-    update.message.reply_text(welcome_msg, parse_mode='Markdown')
-
-# === /predict Command ===
-def predict(update: Update, context: CallbackContext):
+@app.route("/predict", methods=["GET"])
+def predict():
     try:
-        df_live = add_indicators(fetch_data_twelvedata())
-        latest = df_live.iloc[-1]
-        close_price = latest['close']
-        rsi = latest['rsi']
-        macd = latest['macd']
-        ema_50 = latest['ema_50']
-
-        state = latest.values.reshape(1, -1)
-        state = vec_env.normalize_obs(state)
-        action, _states = model.predict(state, deterministic=True)
-        action_name = "Buy" if action == 1 else "Sell" if action == 2 else "Hold"
-
-        tp = sl = None
-        if action_name == "Buy":
-            tp = close_price + 4.0
-            sl = close_price - 3.0
-        elif action_name == "Sell":
-            tp = close_price - 4.0
-            sl = close_price + 3.0
-
-        tp_sl_line = f"🎯 TP: {tp:.2f} | 🛑 SL: {sl:.2f}" if tp and sl else "📌 No TP/SL — holding"
-
-        msg = (
-            f"📊 Live Signal: {action_name}\n"
-            f"💰 Price: {close_price:.2f}\n"
-            f"📈 RSI: {rsi:.2f} | MACD: {macd:.4f} | EMA50: {ema_50:.2f}\n"
-            f"{tp_sl_line}"
-        )
-        update.message.reply_text(msg)
-
+        df = fetch_data(apikey=TWELVE_DATA_API_KEY)
+        signal = generate_ensemble_signal(df, -1)
+        if signal:
+            signal["timestamp"] = df["timestamp"].iloc[-1]
+            send_telegram_signal(signal)
+            return {"status": "ok", "signal": signal}, 200
+        else:
+            return {"status": "ok", "signal": None}, 200
     except Exception as e:
-        update.message.reply_text(f"❌ Error during prediction: {e}")
+        return {"status": "error", "message": str(e)}, 500
 
-# === Main ===
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook():
+    domain = os.getenv("WEBHOOK_DOMAIN")  # e.g., https://your-render-url
+    if not domain:
+        return {"error": "WEBHOOK_DOMAIN not set"}, 400
+    webhook_url = f"{domain}/{TELEGRAM_TOKEN}"
+    success = bot.set_webhook(webhook_url)
+    return {"webhook_url": webhook_url, "success": success}, 200
+
+@app.route("/", methods=["GET"])
+def home():
+    return "SignalBot is running.", 200
+
 if __name__ == "__main__":
-    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("predict", predict))
-
-    bot.set_webhook(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))

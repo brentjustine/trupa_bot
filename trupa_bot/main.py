@@ -161,11 +161,22 @@ def start(update, context):
     context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=(
-            "👋 Welcome to the SignalBot!\n\n"
-            "Use /predict to get the latest trading signal based on multiple strategies.\n"
-            "✅ Strategies: breakout, RSI reversal, engulfing, grid bias, squeeze"
-        )
+            "📡 *SignalBot Activated!*\n\n"
+            "Welcome to the *XAU/USD Strategy SignalBot* — your multi-strategy, real-time trading assistant.\n\n"
+            "📈 _Available Strategies:_\n"
+            "• Breakout\n"
+            "• RSI Reversal\n"
+            "• Engulfing Pattern\n"
+            "• Grid Bias\n"
+            "• Volatility Squeeze\n\n"
+            "🔍 Use /predict anytime to fetch the latest signal based on live 5-minute market data.\n"
+            "Each prediction includes: Direction, Entry, TP, SL, Confidence Score, and Strategy Consensus.\n\n"
+            "🚀 _Precision-powered. Rule-based. Fully Automated._\n"
+            "*Ready when you are.*"
+        ),
+        parse_mode=telegram.constants.ParseMode.MARKDOWN
     )
+
 dispatcher.add_handler(CommandHandler("start", start))
 # === /predict Command for Telegram ===
 def predict_command(update, context):

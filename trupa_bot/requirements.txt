@@ -4,3 +4,6 @@ numpy
 requests
 flask
 gunicorn
+apscheduler
+scikit-learn
+xgboost

@@ -1,35 +1,36 @@
 import os
+import requests
 import numpy as np
 import pandas as pd
-import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import telegram
 from telegram.ext import Dispatcher, CommandHandler
 
-
-# === Environment Variables ===
+# === ENV VARS ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+PORT = int(os.environ.get("PORT", 10000))
 
-# === TP/SL Logic ===
+# === Flask App Init ===
+app = Flask(__name__)
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0)
+
+# === TP/SL Generator ===
 def generate_dynamic_tp_sl(entry, direction, atr, rr=2.0, strategy=None):
-    strategy_rr = {
-        "breakout": 2.0, "rsi_reversal": 1.5,
-        "engulfing": 1.5, "grid_bias": 1.2,
-        "squeeze": 2.5
-    }
-    rr = strategy_rr.get(strategy, rr)
+    rr_map = {"breakout": 2.0, "rsi_reversal": 1.5, "engulfing": 1.5, "grid_bias": 1.2, "squeeze": 2.5}
+    rr = rr_map.get(strategy, rr)
     tp = entry + atr * rr if direction == "buy" else entry - atr * rr
     sl = entry - atr if direction == "buy" else entry + atr
     return tp, sl
 
-# === Strategy Definitions ===
+# === Signal Strategies ===
 def breakout_signal(df, i, lookback=50):
     if i < lookback: return None
-    recent_high = df["high"].iloc[i - lookback:i].max()
-    high = df["high"].iloc[i]
-    close = df["close"].iloc[i]
+    recent_high = df["high"].iloc[i-lookback:i].max()
+    high, close = df["high"].iloc[i], df["close"].iloc[i]
     atr = (df["high"] - df["low"]).rolling(14).mean().iloc[i]
     if high > recent_high:
         tp, sl = generate_dynamic_tp_sl(close, "buy", atr, strategy="breakout")
@@ -92,7 +93,7 @@ def squeeze_signal(df, i, short=10, long=30):
         return {"direction": direction, "confidence": 0.7, "entry": close, "tp": tp, "sl": sl, "strategy": "squeeze"}
     return None
 
-# === Signal Engine ===
+# === Ensemble Signal Engine ===
 def generate_ensemble_signal(df, i):
     strategies = [
         breakout_signal, rsi_reversal_signal, grid_bias_signal,
@@ -104,6 +105,7 @@ def generate_ensemble_signal(df, i):
     best["strategy_votes"] = len(signals)
     return best
 
+# === Fetch Live Data ===
 def fetch_data(symbol="XAU/USD", interval="5min", apikey=None):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={apikey}&outputsize=500"
     response = requests.get(url)
@@ -117,20 +119,26 @@ def fetch_data(symbol="XAU/USD", interval="5min", apikey=None):
     df = df.sort_values("datetime").reset_index(drop=True)
     return df.rename(columns={"datetime": "timestamp"})
 
+# === Telegram Sender ===
 def send_telegram_signal(signal):
     if not signal: return
-    msg = f"✅ Signal at {signal['timestamp']}\nStrategy: {signal['strategy']}\nDirection: {signal['direction']}\nEntry: {round(signal['entry'], 2)}\nTP: {round(signal['tp'], 2)}\nSL: {round(signal['sl'], 2)}\nConfidence: {signal['confidence']}\nVotes: {signal['strategy_votes']}"
+    msg = (
+        f"✅ Signal at {signal['timestamp']}\n"
+        f"Strategy: {signal['strategy']}\n"
+        f"Direction: {signal['direction']}\n"
+        f"Entry: {round(signal['entry'], 2)}\n"
+        f"TP: {round(signal['tp'], 2)}\n"
+        f"SL: {round(signal['sl'], 2)}\n"
+        f"Confidence: {signal['confidence']}\n"
+        f"Votes: {signal['strategy_votes']}"
+    )
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-# === Flask App ===
-app = Flask(__name__)
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0)
-
+# === Flask Routes ===
 @app.route("/", methods=["GET"])
 def health_check():
-    return {"status": "ok", "message": "Signal bot is alive"}, 200
+    return jsonify({"status": "alive"}), 200
 
 @app.route("/predict", methods=["GET"])
 def predict():
@@ -140,12 +148,17 @@ def predict():
         if signal:
             signal["timestamp"] = df["timestamp"].iloc[-1]
             send_telegram_signal(signal)
-            return {"status": "ok", "signal": signal}, 200
-        return {"status": "ok", "signal": None}, 200
+        return jsonify({"status": "ok", "signal": signal}), 200
     except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-# Telegram /start command handler
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def webhook():
+    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok", 200
+
+# === /start Command ===
 def start(update, context):
     context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -158,11 +171,8 @@ def start(update, context):
 
 dispatcher.add_handler(CommandHandler("start", start))
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "ok", 200
-
+# === Entrypoint ===
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7860)
+    if RENDER_HOST:
+        bot.set_webhook(f"https://{RENDER_HOST}/{TELEGRAM_TOKEN}")
+    app.run(host="0.0.0.0", port=PORT)

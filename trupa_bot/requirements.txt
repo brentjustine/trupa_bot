@@ -1,13 +1,6 @@
 python-telegram-bot==13.15
-stable-baselines3
-gym==0.26.2
-gymnasium
-ta
-yfinance
 pandas
 numpy
 requests
-schedule
-gdown
-flask==2.3.3
-shimmy>=2.0
+flask
+gunicorn

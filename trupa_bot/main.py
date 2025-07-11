@@ -106,7 +106,7 @@ def generate_ensemble_signal(df, i):
     return best
 
 # === Fetch Live Data ===
-def fetch_data(symbol="XAU/USD", interval="5min", apikey=None):
+def fetch_data(symbol="XAU/USD", interval="1hr", apikey=None):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={apikey}&outputsize=500"
     response = requests.get(url)
     data = response.json()
@@ -169,7 +169,7 @@ def start(update, context):
             "• Engulfing Pattern\n"
             "• Grid Bias\n"
             "• Volatility Squeeze\n\n"
-            "🔍 Use /predict anytime to fetch the latest signal based on live 5-minute market data.\n"
+            "🔍 Use /predict anytime to fetch the latest signal based on live 1-Hour market data.\n"
             "Each prediction includes: Direction, Entry, TP, SL, Confidence Score, and Strategy Consensus.\n\n"
             "🚀 _Precision-powered. Rule-based. Fully Automated._\n"
             "*Ready when you are.*"

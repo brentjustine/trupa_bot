@@ -174,7 +174,7 @@ def start(update, context):
             "🚀 _Precision-powered. Rule-based. Fully Automated._\n"
             "*Ready when you are.*"
         ),
-        parse_mode=telegram.constants.ParseMode.MARKDOWN
+        parse_mode="Markdown"
     )
 
 dispatcher.add_handler(CommandHandler("start", start))

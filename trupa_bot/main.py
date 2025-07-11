@@ -1,5 +1,4 @@
 import os
-import time
 import numpy as np
 import pandas as pd
 import requests
@@ -7,31 +6,22 @@ from flask import Flask, request
 import telegram
 from telegram.ext import Dispatcher, CommandHandler
 
+
 # === Environment Variables ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
-# === Telegram Bot Initialization ===
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
-
-# === Dynamic TP/SL Generator ===
+# === TP/SL Logic ===
 def generate_dynamic_tp_sl(entry, direction, atr, rr=2.0, strategy=None):
     strategy_rr = {
-        "breakout": 2.0,
-        "rsi_reversal": 1.5,
-        "engulfing": 1.5,
-        "grid_bias": 1.2,
+        "breakout": 2.0, "rsi_reversal": 1.5,
+        "engulfing": 1.5, "grid_bias": 1.2,
         "squeeze": 2.5
     }
     rr = strategy_rr.get(strategy, rr)
-    if direction == "buy":
-        tp = entry + atr * rr
-        sl = entry - atr * 1.0
-    else:
-        tp = entry - atr * rr
-        sl = entry + atr * 1.0
+    tp = entry + atr * rr if direction == "buy" else entry - atr * rr
+    sl = entry - atr if direction == "buy" else entry + atr
     return tp, sl
 
 # === Strategy Definitions ===
@@ -102,6 +92,7 @@ def squeeze_signal(df, i, short=10, long=30):
         return {"direction": direction, "confidence": 0.7, "entry": close, "tp": tp, "sl": sl, "strategy": "squeeze"}
     return None
 
+# === Signal Engine ===
 def generate_ensemble_signal(df, i):
     strategies = [
         breakout_signal, rsi_reversal_signal, grid_bias_signal,
@@ -128,17 +119,18 @@ def fetch_data(symbol="XAU/USD", interval="5min", apikey=None):
 
 def send_telegram_signal(signal):
     if not signal: return
-    msg = f"\u2705 Signal at {signal['timestamp']}\nStrategy: {signal['strategy']}\nDirection: {signal['direction']}\nEntry: {round(signal['entry'], 2)}\nTP: {round(signal['tp'], 2)}\nSL: {round(signal['sl'], 2)}\nConfidence: {signal['confidence']}\nVotes: {signal['strategy_votes']}"
-    bot.send_message(chat_id=CHAT_ID, text=msg)
+    msg = f"✅ Signal at {signal['timestamp']}\nStrategy: {signal['strategy']}\nDirection: {signal['direction']}\nEntry: {round(signal['entry'], 2)}\nTP: {round(signal['tp'], 2)}\nSL: {round(signal['sl'], 2)}\nConfidence: {signal['confidence']}\nVotes: {signal['strategy_votes']}"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 # === Flask App ===
 app = Flask(__name__)
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0)
 
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def telegram_webhook():
-    update = telegram.Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
-    return "OK", 200
+@app.route("/", methods=["GET"])
+def health_check():
+    return {"status": "ok", "message": "Signal bot is alive"}, 200
 
 @app.route("/predict", methods=["GET"])
 def predict():
@@ -149,23 +141,28 @@ def predict():
             signal["timestamp"] = df["timestamp"].iloc[-1]
             send_telegram_signal(signal)
             return {"status": "ok", "signal": signal}, 200
-        else:
-            return {"status": "ok", "signal": None}, 200
+        return {"status": "ok", "signal": None}, 200
     except Exception as e:
         return {"status": "error", "message": str(e)}, 500
 
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    domain = os.getenv("WEBHOOK_DOMAIN")  # e.g., https://your-render-url
-    if not domain:
-        return {"error": "WEBHOOK_DOMAIN not set"}, 400
-    webhook_url = f"{domain}/{TELEGRAM_TOKEN}"
-    success = bot.set_webhook(webhook_url)
-    return {"webhook_url": webhook_url, "success": success}, 200
+# Telegram /start command handler
+def start(update, context):
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "👋 Welcome to the SignalBot!\n\n"
+            "Use /predict to get the latest trading signal based on multiple strategies.\n"
+            "✅ Strategies: breakout, RSI reversal, engulfing, grid bias, squeeze"
+        )
+    )
 
-@app.route("/", methods=["GET"])
-def home():
-    return "SignalBot is running.", 200
+dispatcher.add_handler(CommandHandler("start", start))
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok", 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))
+    app.run(host="0.0.0.0", port=7860)

@@ -106,7 +106,7 @@ def generate_ensemble_signal(df, i):
     return best
 
 # === Fetch Live Data ===
-def fetch_data(symbol="XAU/USD", interval="1hr", apikey=None):
+def fetch_data(symbol="XAU/USD", interval="1h", apikey=None):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={apikey}&outputsize=500"
     response = requests.get(url)
     data = response.json()

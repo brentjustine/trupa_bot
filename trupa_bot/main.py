@@ -138,19 +138,17 @@ def send_telegram_signal(signal):
 # === Flask Routes ===
 @app.route("/", methods=["GET"])
 def health_check():
-    return jsonify({"status": "alive"}), 200
+    return """
+    <html>
+        <head><title>SignalBot Status</title></head>
+        <body style="font-family:sans-serif; text-align:center; margin-top:100px;">
+            <h1>✅ SignalBot is Live</h1>
+            <p>Hosted on Render | XAU/USD Strategy Signal System</p>
+            <p><strong>Use /predict via Telegram or GET /predict from UptimeRobot</strong></p>
+        </body>
+    </html>
+    """, 200
 
-@app.route("/predict", methods=["GET"])
-def predict():
-    try:
-        df = fetch_data(apikey=TWELVE_DATA_API_KEY)
-        signal = generate_ensemble_signal(df, -1)
-        if signal:
-            signal["timestamp"] = df["timestamp"].iloc[-1]
-            send_telegram_signal(signal)
-        return jsonify({"status": "ok", "signal": signal}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
@@ -168,8 +166,30 @@ def start(update, context):
             "✅ Strategies: breakout, RSI reversal, engulfing, grid bias, squeeze"
         )
     )
-
 dispatcher.add_handler(CommandHandler("start", start))
+# === /predict Command for Telegram ===
+def predict_command(update, context):
+    try:
+        df = fetch_data(apikey=TWELVE_DATA_API_KEY)
+        signal = generate_ensemble_signal(df, -1)
+        if signal:
+            signal["timestamp"] = df["timestamp"].iloc[-1]
+            msg = (
+                f"✅ Signal at {signal['timestamp']}\n"
+                f"Strategy: {signal['strategy']}\n"
+                f"Direction: {signal['direction']}\n"
+                f"Entry: {round(signal['entry'], 2)}\n"
+                f"TP: {round(signal['tp'], 2)}\n"
+                f"SL: {round(signal['sl'], 2)}\n"
+                f"Confidence: {signal['confidence']}\n"
+                f"Votes: {signal['strategy_votes']}"
+            )
+        else:
+            msg = "🤖 No valid signal at this time."
+        context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    except Exception as e:
+        context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Error: {e}")      
+dispatcher.add_handler(CommandHandler("predict", predict_command))
 
 # === Entrypoint ===
 if __name__ == "__main__":

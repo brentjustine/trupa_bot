@@ -122,7 +122,7 @@ def train_model():
     winrate = (predictions == y).mean()
     latest_model = model
     latest_stats = {
-        "winrate": round(float(winrate), 2),
+        "winrate": round(float(winrate) * 100, 2),
         "trades": len(trade_data),
         "high_conf": int((model.predict_proba(X)[:, 1] > 0.6).sum())
     }
@@ -146,13 +146,13 @@ def get_signal():
         "entry": round(row['close'], 2),
         "tp": round(tp, 2),
         "sl": round(sl, 2),
-        "win_prob": round(prob, 3)
+        "win_prob": round(prob * 100, 1)
     } if prob > 0.6 else None
 
 # === Telegram Commands ===
 def start(update, context):
     msg = (
-        "📡 Adaptive AI SignalBot Activated!\n\n"
+        "📱 Adaptive AI SignalBot Activated!\n\n"
         "This bot uses XGBoost with dynamic retraining every 3 minutes based on the latest 5000 candles.\n\n"
         "• TP = $3 | SL = $2\n"
         "• /predict - Get the latest signal\n"
@@ -169,7 +169,7 @@ def predict(update, context):
                 f"Direction: {signal['direction']}\n"
                 f"Entry: {signal['entry']}\n"
                 f"TP: {signal['tp']} | SL: {signal['sl']}\n"
-                f"Win Prob: {signal['win_prob']}"
+                f"Confidence: {signal['win_prob']}%"
             )
         else:
             msg = "🤖 No high-confidence signal right now."
@@ -185,10 +185,11 @@ def monitor(update, context):
         f"📊 Model Monitor\n"
         f"Trades Simulated: {latest_stats['trades']}\n"
         f"High Confidence: {latest_stats['high_conf']}\n"
-        f"Winrate: {latest_stats['winrate']}"
+        f"Winrate: {latest_stats['winrate']}%"
     )
     context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode="Markdown")
 
+# === Register Telegram Handlers ===
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("predict", predict))
 dispatcher.add_handler(CommandHandler("monitor", monitor))
@@ -213,4 +214,4 @@ if __name__ == "__main__":
     if RENDER_HOST:
         bot.set_webhook(f"https://{RENDER_HOST}/{TELEGRAM_TOKEN}")
     app.run(host="0.0.0.0", port=PORT)
-  
+    

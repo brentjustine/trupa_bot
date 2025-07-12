@@ -131,7 +131,7 @@ def train_model():
 def get_signal():
     if latest_model is None:
         return None
-    df = fetch_data(apikey=TWELVE_DATA_API_KEY, outputsize=100)
+    df = fetch_data(apikey=TWELVE_DATA_API_KEY, outputsize=150)
     df = compute_features(df)
     row = df.iloc[-1]
     features = ['momentum_score', 'breakout_score', 'compression', 'trend', 'structure', 'sr_position', 'volatility', 'rsi', 'macd_hist', 'bb_squeeze', 'body_strength']
